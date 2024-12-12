@@ -25,8 +25,7 @@ dependencies = [
     "Markdown~=3.7",
     "numpy~=1.26.4",
     "Pillow~=10.4.0",
-    "protobuf~=5.29.1",
-    "pydantic~=2.8.2",
+    "pydantic~=2.10.3",
     "pyloudnorm~=0.1.1",
     "resampy~=0.4.3",
 ]
@@ -71,6 +70,7 @@ together = [ "openai~=1.57.2" ]
 websocket = [ "websockets~=13.1", "fastapi~=0.115.0" ]
 whisper = [ "faster-whisper~=1.1.0" ]
 simli = [ "simli-ai~=0.1.7"]
+protobuf = ["protobuf~=5.29.1"]
 
 [tool.setuptools.packages.find]
 # All the following settings are optional:
