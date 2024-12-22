@@ -491,6 +491,21 @@ class DailyTransportClient(EventHandler):
         self._client.stop_dialout(participant_id, completion=completion_callback(future))
         await future
 
+    async def send_dtmf(self, settings):
+        future = self._loop.create_future()
+        self._client.send_dtmf(settings, completion=completion_callback(future))
+        await future
+
+    async def sip_call_transfer(self, settings):
+        future = self._loop.create_future()
+        self._client.sip_call_transfer(settings, completion=completion_callback(future))
+        await future
+
+    async def sip_refer(self, settings):
+        future = self._loop.create_future()
+        self._client.sip_refer(settings, completion=completion_callback(future))
+        await future
+
     async def start_recording(self, streaming_settings, stream_id, force_new):
         future = self._loop.create_future()
         self._client.start_recording(
@@ -694,17 +709,8 @@ class DailyInputTransport(BaseInputTransport):
             self._audio_in_task = self.get_event_loop().create_task(self._audio_in_task_handler())
 
     async def stop(self, frame: EndFrame):
-        # Leave the room.
-        await self._client.leave()
-        # Stop audio thread.
-        if self._audio_in_task and (self._params.audio_in_enabled or self._params.vad_enabled):
-            self._audio_in_task.cancel()
-            await self._audio_in_task
-            self._audio_in_task = None
         # Parent stop.
         await super().stop(frame)
-
-    async def cancel(self, frame: CancelFrame):
         # Leave the room.
         await self._client.leave()
         # Stop audio thread.
@@ -712,8 +718,17 @@ class DailyInputTransport(BaseInputTransport):
             self._audio_in_task.cancel()
             await self._audio_in_task
             self._audio_in_task = None
+
+    async def cancel(self, frame: CancelFrame):
         # Parent stop.
         await super().cancel(frame)
+        # Leave the room.
+        await self._client.leave()
+        # Stop audio thread.
+        if self._audio_in_task and (self._params.audio_in_enabled or self._params.vad_enabled):
+            self._audio_in_task.cancel()
+            await self._audio_in_task
+            self._audio_in_task = None
 
     async def cleanup(self):
         await super().cleanup()
@@ -817,16 +832,16 @@ class DailyOutputTransport(BaseOutputTransport):
         await self._client.join()
 
     async def stop(self, frame: EndFrame):
-        # Leave the room.
-        await self._client.leave()
         # Parent stop.
         await super().stop(frame)
-
-    async def cancel(self, frame: CancelFrame):
         # Leave the room.
         await self._client.leave()
+
+    async def cancel(self, frame: CancelFrame):
         # Parent stop.
         await super().cancel(frame)
+        # Leave the room.
+        await self._client.leave()
 
     async def cleanup(self):
         await super().cleanup()
@@ -954,6 +969,15 @@ class DailyTransport(BaseTransport):
 
     async def stop_dialout(self, participant_id):
         await self._client.stop_dialout(participant_id)
+
+    async def send_dtmf(self, settings):
+        await self._client.send_dtmf(settings)
+
+    async def sip_call_transfer(self, settings):
+        await self._client.sip_call_transfer(settings)
+
+    async def sip_refer(self, settings):
+        await self._client.sip_refer(settings)
 
     async def start_recording(self, streaming_settings=None, stream_id=None, force_new=None):
         await self._client.start_recording(streaming_settings, stream_id, force_new)

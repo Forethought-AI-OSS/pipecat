@@ -9,21 +9,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added `DailyTransport.send_dtmf()` to send dial-out DTMF tones.
+
+- Added `DailyTransport.sip_call_transfer()` to forward SIP and PSTN calls to
+  another address or number. For example, transfer a SIP call to a different
+  SIP address or transfer a PSTN phone number to a different PSTN phone number.
+
+- Added `DailyTransport.sip_refer()` to transfer incoming SIP/PSTN calls from
+  outside Daily to another SIP/PSTN address.
+
+- Added an `auto_mode` input parameter to `ElevenLabsTTSService`. `auto_mode`
+  is set to `True` by default. Enabling this setting disables the chunk
+  schedule and all buffers, which reduces latency.
+
+- Added `KoalaFilter` which implement on device noise reduction using Koala
+  Noise Suppression.
+  (see https://picovoice.ai/platform/koala/)
+
+- Added `CerebrasLLMService` for Cerebras integration with an OpenAI-compatible
+  interface. Added foundational example `14k-function-calling-cerebras.py`.
+
+- Pipecat now supports Python 3.13. We had a dependency on the `audioop` package
+  which was deprecated and now removed on Python 3.13. We are now using
+  `audioop-lts` (https://github.com/AbstractUmbra/audioop) to provide the same
+  functionality.
+
+- Added timestamped conversation transcript support:
+
+  - New `TranscriptProcessor` factory provides access to user and assistant
+    transcript processors.
+  - `UserTranscriptProcessor` processes user speech with timestamps from
+    transcription.
+  - `AssistantTranscriptProcessor` processes assistant responses with LLM
+    context timestamps.
+  - Messages emitted with ISO 8601 timestamps indicating when they were spoken.
+  - Supports all LLM formats (OpenAI, Anthropic, Google) via standard message
+    format.
+  - New examples: `28a-transcription-processor-openai.py`,
+    `28b-transcription-processor-anthropic.py`, and
+    `28c-transcription-processor-gemini.py`.
+
 - Add support for more languages to ElevenLabs (Arabic, Croatian, Filipino,
   Tamil) and PlayHT (Afrikans, Albanian, Amharic, Arabic, Bengali, Croatian,
   Galician, Hebrew, Mandarin, Serbian, Tagalog, Urdu, Xhosa).
 
 ### Changed
 
-- Changed: Room expiration (`exp`) in `DailyRoomProperties` is now optional
-  (None) by default instead of automatically setting a 5-minute expiration
-  time. You must explicitly set expiration time if desired.
+- `PlayHTTTSService` uses the new v4 websocket API, which also fixes an issue
+  where text inputted to the TTS didn't return audio.
+
+- The default model for `ElevenLabsTTSService` is now `eleven_flash_v2_5`.
+
+- `OpenAIRealtimeBetaLLMService` now takes a `model` parameter in the
+  constructor.
+
+- Updated the default model for the `OpenAIRealtimeBetaLLMService`.
+
+- Room expiration (`exp`) in `DailyRoomProperties` is now optional (`None`) by
+  default instead of automatically setting a 5-minute expiration time. You must
+  explicitly set expiration time if desired.
 
 ### Deprecated
 
 - `AWSTTSService` is now deprecated, use `PollyTTSService` instead.
 
 ### Fixed
+
+- Fixed an issue that could cause the bot to stop talking if there was a user
+  interruption before getting any audio from the TTS service.
+
+- Fixed an issue that would cause `ParallelPipeline` to handle `EndFrame`
+  incorrectly causing the main pipeline to not terminate or terminate too early.
 
 - Fixed an audio stuttering issue in `FastPitchTTSService`.
 
@@ -32,6 +88,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   example, sending a frame `A` after a `TTSSpeakFrame` and the frame `A` will
   only be pushed downstream after the audio generated from `TTSSpeakFrame` has
   been spoken.
+
+- Fixed a [bug](https://github.com/pipecat-ai/pipecat/issues/868) in `DeepgramSTTService` that was causing Language to be passed
+  as python object instead of a string, causing connection to fail.
 
 ## [0.0.51] - 2024-12-16
 
