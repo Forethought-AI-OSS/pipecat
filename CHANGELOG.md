@@ -5,6 +5,50 @@ All notable changes to **Pipecat** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Added a new foundational example `07e-interruptible-playht-http.py` for easy
+  testing of `PlayHTHttpTTSService`.
+
+- Added support for Google TTS Journey voices in `GoogleTTSService`.
+
+- Added `29-livekit-audio-chat.py`, as a new foundational examples for
+  `LiveKitTransportLayer`.
+
+- Added `enable_prejoin_ui`, `max_participants` and `start_video_off` params
+  to `DailyRoomProperties`.
+
+- Added `session_timeout` to `FastAPIWebsocketTransport` and `WebsocketServerTransport`
+  for configuring session timeouts (in seconds). Triggers `on_session_timeout` for custom timeout handling.
+  See [examples/websocket-server/bot.py](https://github.com/pipecat-ai/pipecat/blob/main/examples/websocket-server/bot.py).
+
+- Added the new modalities option and helper function to set Gemini output modalities.
+
+- Added `examples/foundational/26d-gemini-multimodal-live-text.py` which is using Gemini as TEXT modality and using another TTS provider for TTS process.
+
+### Changed
+
+- Changed the default model for `PlayHTHttpTTSService` to `Play3.0-mini-http`.
+
+- api_key, aws_access_key_id and region are no longer required parameters for the PollyTTSService (AWSTTSService)
+
+- Added `session_timeout` example in `examples/websocket-server/bot.py` to handle session timeout event.
+
+- Changed `InputParams` in `src/pipecat/services/gemini_multimodal_live/gemini.py` to support different modalities.
+
+### Fixed
+
+- Fixed an import issue for `PlayHTHttpTTSService`.
+
+- Fixed an issue where languages couldn't be used with the `PlayHTHttpTTSService`.
+
+- Fixed an issue where `OpenAIRealtimeBetaLLMService` audio chunks were hitting
+  an error when truncating audio content.
+
+- Fixed an issue where setting the voice and model for `RimeHttpTTSService` wasn't working.
+
 ## [0.0.52] - 2024-12-24
 
 ### Added

@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2024, Daily
+# Copyright (c) 2025, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
@@ -35,7 +35,7 @@ class TavusVideoService(AIService):
         *,
         api_key: str,
         replica_id: str,
-        persona_id: str = "pipecat0",
+        persona_id: str = "pipecat0",  # Use `pipecat0` so that your TTS voice is used in place of the Tavus persona
         session: aiohttp.ClientSession,
         **kwargs,
     ) -> None:
