@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2025, Daily
+# Copyright (c) 2024–2025, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
@@ -88,7 +88,7 @@ class TavusVideoService(AIService):
         if not done:
             audio = resample_audio(audio, original_sample_rate, 16000)
         audio_base64 = base64.b64encode(audio).decode("utf-8")
-        logger.trace(f"TavusVideoService sending {len(audio)} bytes")
+        logger.trace(f"{self}: sending {len(audio)} bytes")
         await self._send_audio_message(audio_base64, done=done)
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):

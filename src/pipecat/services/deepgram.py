@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2025, Daily
+# Copyright (c) 2024–2025, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
@@ -20,7 +20,10 @@ from pipecat.frames.frames import (
     TTSAudioRawFrame,
     TTSStartedFrame,
     TTSStoppedFrame,
+    UserStartedSpeakingFrame,
+    UserStoppedSpeakingFrame,
 )
+from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.ai_services import STTService, TTSService
 from pipecat.transcriptions.language import Language
 from pipecat.utils.time import time_now_iso8601
@@ -167,7 +170,7 @@ class DeepgramSTTService(STTService):
         return self._settings["vad_events"]
 
     def can_generate_metrics(self) -> bool:
-        return self.vad_enabled
+        return True
 
     async def set_model(self, model: str):
         await super().set_model(model)
@@ -208,9 +211,12 @@ class DeepgramSTTService(STTService):
             logger.debug("Disconnecting from Deepgram")
             await self._connection.finish()
 
-    async def _on_speech_started(self, *args, **kwargs):
+    async def start_metrics(self):
         await self.start_ttfb_metrics()
         await self.start_processing_metrics()
+
+    async def _on_speech_started(self, *args, **kwargs):
+        await self.start_metrics()
         await self._call_event_handler("on_speech_started", *args, **kwargs)
 
     async def _on_utterance_end(self, *args, **kwargs):
@@ -237,3 +243,14 @@ class DeepgramSTTService(STTService):
                 await self.push_frame(
                     InterimTranscriptionFrame(transcript, "", time_now_iso8601(), language)
                 )
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, UserStartedSpeakingFrame) and not self.vad_enabled:
+            # Start metrics if Deepgram VAD is disabled & pipeline VAD has detected speech
+            await self.start_metrics()
+        elif isinstance(frame, UserStoppedSpeakingFrame):
+            # https://developers.deepgram.com/docs/finalize
+            await self._connection.finalize()
+            logger.trace(f"Triggered finalize event on: {frame.name=}, {direction=}")
