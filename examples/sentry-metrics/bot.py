@@ -9,6 +9,7 @@ import os
 import sys
 
 import aiohttp
+import sentry_sdk
 from dotenv import load_dotenv
 from loguru import logger
 from runner import configure
@@ -18,7 +19,8 @@ from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
-from pipecat.services.lmnt import LmntTTSService
+from pipecat.processors.metrics.sentry import SentryMetrics
+from pipecat.services.elevenlabs import ElevenLabsTTSService
 from pipecat.services.openai import OpenAILLMService
 from pipecat.transports.services.daily import DailyParams, DailyTransport
 
@@ -35,23 +37,40 @@ async def main():
         transport = DailyTransport(
             room_url,
             token,
-            "Respond bot",
+            "Chatbot",
             DailyParams(
                 audio_out_enabled=True,
-                transcription_enabled=True,
+                audio_in_enabled=True,
+                camera_out_enabled=False,
                 vad_enabled=True,
+                vad_audio_passthrough=True,
                 vad_analyzer=SileroVADAnalyzer(),
+                transcription_enabled=True,
             ),
         )
 
-        tts = LmntTTSService(api_key=os.getenv("LMNT_API_KEY"), voice_id="morgan")
+        # Initialize Sentry
+        sentry_sdk.init(
+            dsn="your-project-dsn",
+            traces_sample_rate=1.0,
+        )
 
-        llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"), model="gpt-4o")
+        tts = ElevenLabsTTSService(
+            api_key=os.getenv("ELEVENLABS_API_KEY"),
+            voice_id="cgSgspJ2msm6clMCkdW9",
+            metrics=SentryMetrics(),
+        )
+
+        llm = OpenAILLMService(
+            api_key=os.getenv("OPENAI_API_KEY"),
+            model="gpt-4o",
+            metrics=SentryMetrics(),
+        )
 
         messages = [
             {
                 "role": "system",
-                "content": "You are a helpful LLM in a WebRTC call. Your goal is to demonstrate your capabilities in a succinct way. Your output will be converted to audio so don't include special characters in your answers. Respond to what the user said in a creative and helpful way.",
+                "content": "You are Chatbot, a friendly, helpful robot. Your goal is to demonstrate your capabilities in a succinct way. Your output will be converted to audio so don't include special characters in your answers. Respond to what the user said in a creative and helpful way, but keep your responses brief. Start by introducing yourself.",
             },
         ]
 
@@ -60,34 +79,28 @@ async def main():
 
         pipeline = Pipeline(
             [
-                transport.input(),  # Transport user input
-                context_aggregator.user(),  # User respones
-                llm,  # LLM
-                tts,  # TTS
-                transport.output(),  # Transport bot output
-                context_aggregator.assistant(),  # Assistant spoken responses
+                transport.input(),  # microphone
+                context_aggregator.user(),
+                llm,
+                tts,
+                transport.output(),
+                context_aggregator.assistant(),
             ]
         )
 
         task = PipelineTask(
             pipeline,
-            PipelineParams(
-                allow_interruptions=True,
-                enable_metrics=True,
-                enable_usage_metrics=True,
-                report_only_initial_ttfb=True,
-            ),
+            PipelineParams(allow_interruptions=True, enable_metrics=True),
         )
 
         @transport.event_handler("on_first_participant_joined")
         async def on_first_participant_joined(transport, participant):
             await transport.capture_participant_transcription(participant["id"])
-            # Kick off the conversation.
-            messages.append({"role": "system", "content": "Please introduce yourself to the user."})
             await task.queue_frames([context_aggregator.user().get_context_frame()])
 
         @transport.event_handler("on_participant_left")
         async def on_participant_left(transport, participant, reason):
+            print(f"Participant left: {participant}")
             await task.cancel()
 
         runner = PipelineRunner()

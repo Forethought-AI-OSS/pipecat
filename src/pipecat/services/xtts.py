@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
-from typing import Any, AsyncGenerator, Dict
+from typing import Any, AsyncGenerator, Dict, Optional
 
 import aiohttp
 from loguru import logger
@@ -29,7 +29,7 @@ from pipecat.transcriptions.language import Language
 # https://github.com/coqui-ai/xtts-streaming-server
 
 
-def language_to_xtts_language(language: Language) -> str | None:
+def language_to_xtts_language(language: Language) -> Optional[str]:
     BASE_LANGUAGES = {
         Language.CS: "cs",
         Language.DE: "de",
@@ -76,7 +76,7 @@ class XTTSService(TTSService):
         base_url: str,
         aiohttp_session: aiohttp.ClientSession,
         language: Language = Language.EN,
-        sample_rate: int = 24000,
+        sample_rate: Optional[int] = None,
         **kwargs,
     ):
         super().__init__(sample_rate=sample_rate, **kwargs)
@@ -86,7 +86,7 @@ class XTTSService(TTSService):
             "base_url": base_url,
         }
         self.set_voice(voice_id)
-        self._studio_speakers: Dict[str, Any] | None = None
+        self._studio_speakers: Optional[Dict[str, Any]] = None
         self._aiohttp_session = aiohttp_session
 
         self._resampler = create_default_resampler()
@@ -94,7 +94,7 @@ class XTTSService(TTSService):
     def can_generate_metrics(self) -> bool:
         return True
 
-    def language_to_service_language(self, language: Language) -> str | None:
+    def language_to_service_language(self, language: Language) -> Optional[str]:
         return language_to_xtts_language(language)
 
     async def start(self, frame: StartFrame):
@@ -164,18 +164,18 @@ class XTTSService(TTSService):
 
                         # XTTS uses 24000 so we need to resample to our desired rate.
                         resampled_audio = await self._resampler.resample(
-                            bytes(process_data), 24000, self._sample_rate
+                            bytes(process_data), 24000, self.sample_rate
                         )
                         # Create the frame with the resampled audio
-                        frame = TTSAudioRawFrame(resampled_audio, self._sample_rate, 1)
+                        frame = TTSAudioRawFrame(resampled_audio, self.sample_rate, 1)
                         yield frame
 
             # Process any remaining data in the buffer.
             if len(buffer) > 0:
                 resampled_audio = await self._resampler.resample(
-                    bytes(buffer), 24000, self._sample_rate
+                    bytes(buffer), 24000, self.sample_rate
                 )
-                frame = TTSAudioRawFrame(resampled_audio, self._sample_rate, 1)
+                frame = TTSAudioRawFrame(resampled_audio, self.sample_rate, 1)
                 yield frame
 
             yield TTSStoppedFrame()
