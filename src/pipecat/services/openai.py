@@ -48,7 +48,13 @@ from pipecat.processors.aggregators.openai_llm_context import (
     OpenAILLMContextFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
-from pipecat.services.ai_services import ImageGenService, LLMService, TTSService
+from pipecat.services.ai_services import (
+    ImageGenService,
+    LLMService,
+    TTSService,
+)
+from pipecat.services.base_whisper import BaseWhisperSTTService, Transcription
+from pipecat.transcriptions.language import Language
 from pipecat.utils.time import time_now_iso8601
 
 try:
@@ -349,7 +355,7 @@ class OpenAILLMService(BaseOpenAILLMService):
     ) -> OpenAIContextAggregatorPair:
         user = OpenAIUserContextAggregator(context)
         assistant = OpenAIAssistantContextAggregator(
-            user, expect_stripped_words=assistant_expect_stripped_words
+            context, expect_stripped_words=assistant_expect_stripped_words
         )
         return OpenAIContextAggregatorPair(_user=user, _assistant=assistant)
 
@@ -389,6 +395,62 @@ class OpenAIImageGenService(ImageGenService):
             image = Image.open(image_stream)
             frame = URLImageRawFrame(image_url, image.tobytes(), image.size, image.format)
             yield frame
+
+
+class OpenAISTTService(BaseWhisperSTTService):
+    """OpenAI Whisper speech-to-text service.
+
+    Uses OpenAI's Whisper API to convert audio to text. Requires an OpenAI API key
+    set via the api_key parameter or OPENAI_API_KEY environment variable.
+
+    Args:
+        model: Whisper model to use. Defaults to "whisper-1".
+        api_key: OpenAI API key. Defaults to None.
+        base_url: API base URL. Defaults to None.
+        language: Language of the audio input. Defaults to English.
+        prompt: Optional text to guide the model's style or continue a previous segment.
+        temperature: Optional sampling temperature between 0 and 1. Defaults to 0.0.
+        **kwargs: Additional arguments passed to BaseWhisperSTTService.
+    """
+
+    def __init__(
+        self,
+        *,
+        model: str = "whisper-1",
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        language: Optional[Language] = Language.EN,
+        prompt: Optional[str] = None,
+        temperature: Optional[float] = None,
+        **kwargs,
+    ):
+        super().__init__(
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            language=language,
+            prompt=prompt,
+            temperature=temperature,
+            **kwargs,
+        )
+
+    async def _transcribe(self, audio: bytes) -> Transcription:
+        assert self._language is not None  # Assigned in the BaseWhisperSTTService class
+
+        # Build kwargs dict with only set parameters
+        kwargs = {
+            "file": ("audio.wav", audio, "audio/wav"),
+            "model": self.model_name,
+            "language": self._language,
+        }
+
+        if self._prompt is not None:
+            kwargs["prompt"] = self._prompt
+
+        if self._temperature is not None:
+            kwargs["temperature"] = self._temperature
+
+        return await self._client.audio.transcriptions.create(**kwargs)
 
 
 class OpenAITTSService(TTSService):
@@ -493,8 +555,8 @@ class OpenAIImageMessageFrame(Frame):
 
 
 class OpenAIUserContextAggregator(LLMUserContextAggregator):
-    def __init__(self, context: OpenAILLMContext):
-        super().__init__(context=context)
+    def __init__(self, context: OpenAILLMContext, **kwargs):
+        super().__init__(context=context, **kwargs)
 
     async def process_frame(self, frame, direction):
         await super().process_frame(frame, direction)
@@ -530,9 +592,8 @@ class OpenAIUserContextAggregator(LLMUserContextAggregator):
 
 
 class OpenAIAssistantContextAggregator(LLMAssistantContextAggregator):
-    def __init__(self, user_context_aggregator: OpenAIUserContextAggregator, **kwargs):
-        super().__init__(context=user_context_aggregator._context, **kwargs)
-        self._user_context_aggregator = user_context_aggregator
+    def __init__(self, context: OpenAILLMContext, **kwargs):
+        super().__init__(context=context, **kwargs)
         self._function_calls_in_progress = {}
         self._function_call_result = None
         self._pending_image_frame_message = None
@@ -552,7 +613,7 @@ class OpenAIAssistantContextAggregator(LLMAssistantContextAggregator):
                 del self._function_calls_in_progress[frame.tool_call_id]
                 self._function_call_result = frame
                 # TODO-CB: Kwin wants us to refactor this out of here but I REFUSE
-                await self._push_aggregation()
+                await self.push_aggregation()
             else:
                 logger.warning(
                     "FunctionCallResultFrame tool_call_id does not match any function call in progress"
@@ -560,9 +621,9 @@ class OpenAIAssistantContextAggregator(LLMAssistantContextAggregator):
                 self._function_call_result = None
         elif isinstance(frame, OpenAIImageMessageFrame):
             self._pending_image_frame_message = frame
-            await self._push_aggregation()
+            await self.push_aggregation()
 
-    async def _push_aggregation(self):
+    async def push_aggregation(self):
         if not (
             self._aggregation or self._function_call_result or self._pending_image_frame_message
         ):
@@ -572,7 +633,7 @@ class OpenAIAssistantContextAggregator(LLMAssistantContextAggregator):
         properties: Optional[FunctionCallResultProperties] = None
 
         aggregation = self._aggregation
-        self._reset()
+        self.reset()
 
         try:
             if self._function_call_result:
@@ -624,15 +685,14 @@ class OpenAIAssistantContextAggregator(LLMAssistantContextAggregator):
                 run_llm = True
 
             if run_llm:
-                await self._user_context_aggregator.push_context_frame()
+                await self.push_context_frame(FrameDirection.UPSTREAM)
 
             # Emit the on_context_updated callback once the function call result is added to the context
             if properties and properties.on_context_updated is not None:
                 await properties.on_context_updated()
 
             # Push context frame
-            frame = OpenAILLMContextFrame(self._context)
-            await self.push_frame(frame)
+            await self.push_context_frame()
 
             # Push timestamp frame with current time
             timestamp_frame = OpenAILLMContextAssistantTimestampFrame(timestamp=time_now_iso8601())
