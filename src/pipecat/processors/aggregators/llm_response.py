@@ -22,6 +22,7 @@ from pipecat.frames.frames import (
     LLMMessagesFrame,
     LLMMessagesUpdateFrame,
     LLMSetToolsFrame,
+    LLMTextFrame,
     StartFrame,
     StartInterruptionFrame,
     TextFrame,
@@ -34,6 +35,59 @@ from pipecat.processors.aggregators.openai_llm_context import (
     OpenAILLMContextFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+
+
+class LLMFullResponseAggregator(FrameProcessor):
+    """This is an LLM aggregator that aggregates a full LLM completion. It
+    aggregates LLM text frames (tokens) received between
+    `LLMFullResponseStartFrame` and `LLMFullResponseEndFrame`. Every full
+    completion is returned via the "on_completion" event handler:
+
+       @aggregator.event_handler("on_completion")
+       async def on_completion(
+           aggregator: LLMFullResponseAggregator,
+           completion: str,
+           completed: bool,
+       )
+
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+        self._aggregation = ""
+        self._started = False
+
+        self._register_event_handler("on_completion")
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, StartInterruptionFrame):
+            await self._call_event_handler("on_completion", self._aggregation, False)
+            self._aggregation = ""
+            self._started = False
+        elif isinstance(frame, LLMFullResponseStartFrame):
+            await self._handle_llm_start(frame)
+        elif isinstance(frame, LLMFullResponseEndFrame):
+            await self._handle_llm_end(frame)
+        elif isinstance(frame, LLMTextFrame):
+            await self._handle_llm_text(frame)
+
+        await self.push_frame(frame, direction)
+
+    async def _handle_llm_start(self, _: LLMFullResponseStartFrame):
+        self._started = True
+
+    async def _handle_llm_end(self, _: LLMFullResponseEndFrame):
+        await self._call_event_handler("on_completion", self._aggregation, True)
+        self._started = False
+        self._aggregation = ""
+
+    async def _handle_llm_text(self, frame: TextFrame):
+        if not self._started:
+            return
+        self._aggregation += frame.text
 
 
 class BaseLLMResponseAggregator(FrameProcessor):
@@ -145,6 +199,9 @@ class LLMResponseAggregator(BaseLLMResponseAggregator):
             frame = LLMMessagesFrame(self._messages)
             await self.push_frame(frame)
 
+            # Reset our accumulator state.
+            self.reset()
+
 
 class LLMContextResponseAggregator(BaseLLMResponseAggregator):
     """This is a base LLM aggregator that uses an LLM context to store the
@@ -243,11 +300,15 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
         await super().process_frame(frame, direction)
 
         if isinstance(frame, StartFrame):
+            # Push StartFrame before start(), because we want StartFrame to be
+            # processed by every processor before any other frame is processed.
+            await self.push_frame(frame, direction)
             await self._start(frame)
-            await self.push_frame(frame, direction)
         elif isinstance(frame, EndFrame):
-            await self._stop(frame)
+            # Push EndFrame before stop(), because stop() waits on the task to
+            # finish and the task finishes when EndFrame is processed.
             await self.push_frame(frame, direction)
+            await self._stop(frame)
         elif isinstance(frame, CancelFrame):
             await self._cancel(frame)
             await self.push_frame(frame, direction)
@@ -290,7 +351,13 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
             await self.push_aggregation()
 
     async def _handle_transcription(self, frame: TranscriptionFrame):
-        self._aggregation += f" {frame.text}" if self._aggregation else frame.text
+        text = frame.text
+
+        # Make sure we really have some text.
+        if not text.strip():
+            return
+
+        self._aggregation += f" {text}" if self._aggregation else text
         # We just got a final result, so let's reset interim results.
         self._seen_interim_results = False
         # Reset aggregation timer.
@@ -298,11 +365,10 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
 
     async def _handle_interim_transcription(self, _: InterimTranscriptionFrame):
         self._seen_interim_results = True
-        # Reset aggregation timer.
-        self._aggregation_event.set()
 
     def _create_aggregation_task(self):
-        self._aggregation_task = self.create_task(self._aggregation_task_handler())
+        if not self._aggregation_task:
+            self._aggregation_task = self.create_task(self._aggregation_task_handler())
 
     async def _cancel_aggregation_task(self):
         if self._aggregation_task:

@@ -23,6 +23,7 @@ from pipecat.frames.frames import (
     Frame,
     FunctionCallInProgressFrame,
     FunctionCallResultFrame,
+    InputAudioRawFrame,
     StartFrame,
     StartInterruptionFrame,
     StopInterruptionFrame,
@@ -31,7 +32,6 @@ from pipecat.frames.frames import (
     UserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-from pipecat.services.ai_services import STTService
 
 
 class STTMuteStrategy(Enum):
@@ -93,7 +93,7 @@ class STTMuteFilter(FrameProcessor):
     """
 
     def __init__(
-        self, *, config: STTMuteConfig, stt_service: Optional[STTService] = None, **kwargs
+        self, *, config: STTMuteConfig, stt_service: Optional[FrameProcessor] = None, **kwargs
     ):
         super().__init__(**kwargs)
         self._config = config
@@ -185,13 +185,14 @@ class STTMuteFilter(FrameProcessor):
                 StopInterruptionFrame,
                 UserStartedSpeakingFrame,
                 UserStoppedSpeakingFrame,
+                InputAudioRawFrame,
             ),
         ):
             # Only pass VAD-related frames when not muted
             if not self.is_muted:
                 await self.push_frame(frame, direction)
             else:
-                logger.debug(f"{frame.__class__.__name__} suppressed - STT currently muted")
+                logger.trace(f"{frame.__class__.__name__} suppressed - STT currently muted")
         else:
             # Pass all other frames through
             await self.push_frame(frame, direction)

@@ -375,6 +375,22 @@ class RTVIMetricsMessage(BaseModel):
     data: Mapping[str, Any]
 
 
+class RTVIServerMessage(BaseModel):
+    label: RTVIMessageLiteral = RTVI_MESSAGE_LABEL
+    type: Literal["server-message"] = "server-message"
+    data: Any
+
+
+@dataclass
+class RTVIServerMessageFrame(SystemFrame):
+    """A frame for sending server messages to the client."""
+
+    data: Any
+
+    def __str__(self):
+        return f"{self.name}(data: {self.data})"
+
+
 class RTVIFrameProcessor(FrameProcessor):
     def __init__(self, direction: FrameDirection = FrameDirection.DOWNSTREAM, **kwargs):
         super().__init__(**kwargs)
@@ -710,6 +726,9 @@ class RTVIObserver(BaseObserver):
                 mark_as_seen = False
         elif isinstance(frame, MetricsFrame):
             await self._handle_metrics(frame)
+        elif isinstance(frame, RTVIServerMessageFrame):
+            message = RTVIServerMessage(data=frame.data)
+            await self.push_transport_message_urgent(message)
 
         if mark_as_seen:
             self._frames_seen.add(frame.id)
@@ -956,8 +975,10 @@ class RTVIProcessor(FrameProcessor):
             await self._pipeline.cleanup()
 
     async def _start(self, frame: StartFrame):
-        self._action_task = self.create_task(self._action_task_handler())
-        self._message_task = self.create_task(self._message_task_handler())
+        if not self._action_task:
+            self._action_task = self.create_task(self._action_task_handler())
+        if not self._message_task:
+            self._message_task = self.create_task(self._message_task_handler())
         await self._call_event_handler("on_bot_started")
 
     async def _stop(self, frame: EndFrame):

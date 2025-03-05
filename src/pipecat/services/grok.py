@@ -7,7 +7,7 @@
 
 import json
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 from loguru import logger
 
@@ -37,10 +37,13 @@ class GrokAssistantContextAggregator(OpenAIAssistantContextAggregator):
         run_llm = False
         properties: Optional[FunctionCallResultProperties] = None
 
-        aggregation = self._aggregation
+        aggregation = self._aggregation.strip()
         self.reset()
 
         try:
+            if aggregation:
+                self._context.add_message({"role": "assistant", "content": aggregation})
+
             if self._function_call_result:
                 frame = self._function_call_result
                 properties = frame.properties
@@ -76,9 +79,6 @@ class GrokAssistantContextAggregator(OpenAIAssistantContextAggregator):
                     else:
                         # Default behavior is to run the LLM if there are no function calls in progress
                         run_llm = not bool(self._function_calls_in_progress)
-
-            else:
-                self._context.add_message({"role": "assistant", "content": aggregation})
 
             if self._pending_image_frame_message:
                 frame = self._pending_image_frame_message
@@ -125,7 +125,7 @@ class GrokLLMService(OpenAILLMService):
     Args:
         api_key (str): The API key for accessing Grok's API
         base_url (str, optional): The base URL for Grok API. Defaults to "https://api.x.ai/v1"
-        model (str, optional): The model identifier to use. Defaults to "grok-beta"
+        model (str, optional): The model identifier to use. Defaults to "grok-2"
         **kwargs: Additional keyword arguments passed to OpenAILLMService
     """
 
@@ -134,7 +134,7 @@ class GrokLLMService(OpenAILLMService):
         *,
         api_key: str,
         base_url: str = "https://api.x.ai/v1",
-        model: str = "grok-beta",
+        model: str = "grok-2",
         **kwargs,
     ):
         super().__init__(api_key=api_key, base_url=base_url, model=model, **kwargs)
@@ -208,10 +208,30 @@ class GrokLLMService(OpenAILLMService):
 
     @staticmethod
     def create_context_aggregator(
-        context: OpenAILLMContext, *, assistant_expect_stripped_words: bool = True
+        context: OpenAILLMContext,
+        *,
+        user_kwargs: Mapping[str, Any] = {},
+        assistant_kwargs: Mapping[str, Any] = {},
     ) -> GrokContextAggregatorPair:
-        user = OpenAIUserContextAggregator(context)
-        assistant = GrokAssistantContextAggregator(
-            context, expect_stripped_words=assistant_expect_stripped_words
-        )
+        """Create an instance of GrokContextAggregatorPair from an
+        OpenAILLMContext. Constructor keyword arguments for both the user and
+        assistant aggregators can be provided.
+
+        Args:
+            context (OpenAILLMContext): The LLM context.
+            user_kwargs (Mapping[str, Any], optional): Additional keyword
+                arguments for the user context aggregator constructor. Defaults
+                to an empty mapping.
+            assistant_kwargs (Mapping[str, Any], optional): Additional keyword
+                arguments for the assistant context aggregator
+                constructor. Defaults to an empty mapping.
+
+        Returns:
+            GrokContextAggregatorPair: A pair of context aggregators, one for
+            the user and one for the assistant, encapsulated in an
+            GrokContextAggregatorPair.
+
+        """
+        user = OpenAIUserContextAggregator(context, **user_kwargs)
+        assistant = GrokAssistantContextAggregator(context, **assistant_kwargs)
         return GrokContextAggregatorPair(_user=user, _assistant=assistant)

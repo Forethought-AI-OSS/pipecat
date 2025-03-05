@@ -4,15 +4,16 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
+import asyncio
 import base64
 import copy
 import io
 import json
 import re
-from asyncio import CancelledError
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Mapping, Optional, Union
 
+import httpx
 from loguru import logger
 from PIL import Image
 from pydantic import BaseModel, Field
@@ -96,7 +97,7 @@ class AnthropicLLMService(LLMService):
         self,
         *,
         api_key: str,
-        model: str = "claude-3-5-sonnet-20241022",
+        model: str = "claude-3-7-sonnet-20250219",
         params: InputParams = InputParams(),
         client=None,
         **kwargs,
@@ -124,14 +125,34 @@ class AnthropicLLMService(LLMService):
 
     @staticmethod
     def create_context_aggregator(
-        context: OpenAILLMContext, *, assistant_expect_stripped_words: bool = True
+        context: OpenAILLMContext,
+        *,
+        user_kwargs: Mapping[str, Any] = {},
+        assistant_kwargs: Mapping[str, Any] = {},
     ) -> AnthropicContextAggregatorPair:
+        """Create an instance of AnthropicContextAggregatorPair from an
+        OpenAILLMContext. Constructor keyword arguments for both the user and
+        assistant aggregators can be provided.
+
+        Args:
+            context (OpenAILLMContext): The LLM context.
+            user_kwargs (Mapping[str, Any], optional): Additional keyword
+                arguments for the user context aggregator constructor. Defaults
+                to an empty mapping.
+            assistant_kwargs (Mapping[str, Any], optional): Additional keyword
+                arguments for the assistant context aggregator
+                constructor. Defaults to an empty mapping.
+
+        Returns:
+            AnthropicContextAggregatorPair: A pair of context aggregators, one
+            for the user and one for the assistant, encapsulated in an
+            AnthropicContextAggregatorPair.
+
+        """
         if isinstance(context, OpenAILLMContext):
             context = AnthropicLLMContext.from_openai_context(context)
-        user = AnthropicUserContextAggregator(context)
-        assistant = AnthropicAssistantContextAggregator(
-            context, expect_stripped_words=assistant_expect_stripped_words
-        )
+        user = AnthropicUserContextAggregator(context, **user_kwargs)
+        assistant = AnthropicAssistantContextAggregator(context, **assistant_kwargs)
         return AnthropicContextAggregatorPair(_user=user, _assistant=assistant)
 
     async def _process_context(self, context: OpenAILLMContext):
@@ -151,7 +172,7 @@ class AnthropicLLMService(LLMService):
             await self.start_processing_metrics()
 
             logger.debug(
-                f"Generating chat: {context.system} | {context.get_messages_for_logging()}"
+                f"{self}: Generating chat [{context.system}] | [{context.get_messages_for_logging()}]"
             )
 
             messages = context.messages
@@ -251,12 +272,14 @@ class AnthropicLLMService(LLMService):
                     if total_input_tokens >= 1024:
                         context.turns_above_cache_threshold += 1
 
-        except CancelledError:
+        except asyncio.CancelledError:
             # If we're interrupted, we won't get a complete usage report. So set our flag to use the
             # token estimate. The reraise the exception so all the processors running in this task
             # also get cancelled.
             use_completion_tokens_estimate = True
             raise
+        except httpx.TimeoutException:
+            await self._call_event_handler("on_completion_timeout")
         except Exception as e:
             logger.exception(f"{self} exception: {e}")
         finally:
@@ -743,18 +766,19 @@ class AnthropicAssistantContextAggregator(LLMAssistantContextAggregator):
         run_llm = False
         properties: Optional[FunctionCallResultProperties] = None
 
-        aggregation = self._aggregation
+        aggregation = self._aggregation.strip()
         self.reset()
 
         try:
+            if aggregation:
+                self._context.add_message({"role": "assistant", "content": aggregation})
+
             if self._function_call_result:
                 frame = self._function_call_result
                 properties = frame.properties
                 self._function_call_result = None
                 if frame.result:
                     assistant_message = {"role": "assistant", "content": []}
-                    if aggregation:
-                        assistant_message["content"].append({"type": "text", "text": aggregation})
                     assistant_message["content"].append(
                         {
                             "type": "tool_use",
@@ -782,8 +806,6 @@ class AnthropicAssistantContextAggregator(LLMAssistantContextAggregator):
                     else:
                         # Default behavior
                         run_llm = True
-            elif aggregation:
-                self._context.add_message({"role": "assistant", "content": aggregation})
 
             if self._pending_image_frame_message:
                 frame = self._pending_image_frame_message
