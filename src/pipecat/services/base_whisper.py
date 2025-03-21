@@ -7,21 +7,13 @@
 from typing import AsyncGenerator, Optional
 
 from loguru import logger
+from openai import AsyncOpenAI
+from openai.types.audio import Transcription
 
 from pipecat.frames.frames import ErrorFrame, Frame, TranscriptionFrame
 from pipecat.services.ai_services import SegmentedSTTService
 from pipecat.transcriptions.language import Language
 from pipecat.utils.time import time_now_iso8601
-
-try:
-    from openai import AsyncOpenAI
-    from openai.types.audio import Transcription
-except ModuleNotFoundError as e:
-    logger.error(f"Exception: {e}")
-    logger.error(
-        "In order to use OpenAI, you need to `pip install pipecat-ai[openai]`. Also, set `OPENAI_API_KEY` environment variable."
-    )
-    raise Exception(f"Missing module: {e}")
 
 
 def language_to_whisper_language(language: Language) -> Optional[str]:
@@ -145,6 +137,15 @@ class BaseWhisperSTTService(SegmentedSTTService):
 
     def language_to_service_language(self, language: Language) -> Optional[str]:
         return language_to_whisper_language(language)
+
+    async def set_language(self, language: Language):
+        """Set the language for transcription.
+
+        Args:
+            language: The Language enum value to use for transcription.
+        """
+        logger.info(f"Switching STT language to: [{language}]")
+        self._language = language
 
     async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
         try:

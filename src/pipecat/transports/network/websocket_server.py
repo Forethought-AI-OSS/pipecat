@@ -22,7 +22,6 @@ from pipecat.frames.frames import (
     OutputAudioRawFrame,
     StartFrame,
     StartInterruptionFrame,
-    TextFrame,
     TransportMessageFrame,
     TransportMessageUrgentFrame,
 )
@@ -56,6 +55,7 @@ class WebsocketServerCallbacks(BaseModel):
 class WebsocketServerInputTransport(BaseInputTransport):
     def __init__(
         self,
+        transport: BaseTransport,
         host: str,
         port: int,
         params: WebsocketServerParams,
@@ -64,6 +64,7 @@ class WebsocketServerInputTransport(BaseInputTransport):
     ):
         super().__init__(params, **kwargs)
 
+        self._transport = transport
         self._host = host
         self._port = port
         self._params = params
@@ -81,22 +82,31 @@ class WebsocketServerInputTransport(BaseInputTransport):
     async def start(self, frame: StartFrame):
         await super().start(frame)
         await self._params.serializer.setup(frame)
-        self._server_task = self.create_task(self._server_task_handler())
+        if not self._server_task:
+            self._server_task = self.create_task(self._server_task_handler())
 
     async def stop(self, frame: EndFrame):
         await super().stop(frame)
         self._stop_server_event.set()
         if self._monitor_task:
             await self.cancel_task(self._monitor_task)
+            self._monitor_task = None
         if self._server_task:
             await self.wait_for_task(self._server_task)
+            self._server_task = None
 
     async def cancel(self, frame: CancelFrame):
         await super().cancel(frame)
         if self._monitor_task:
             await self.cancel_task(self._monitor_task)
+            self._monitor_task = None
         if self._server_task:
             await self.cancel_task(self._server_task)
+            self._server_task = None
+
+    async def cleanup(self):
+        await super().cleanup()
+        await self._transport.cleanup()
 
     async def _server_task_handler(self):
         logger.info(f"Starting websocket server on {self._host}:{self._port}")
@@ -116,7 +126,7 @@ class WebsocketServerInputTransport(BaseInputTransport):
         await self._callbacks.on_client_connected(websocket)
 
         # Create a task to monitor the websocket connection
-        if self._params.session_timeout:
+        if not self._monitor_task and self._params.session_timeout:
             self._monitor_task = self.create_task(
                 self._monitor_websocket(websocket, self._params.session_timeout)
             )
@@ -159,9 +169,10 @@ class WebsocketServerInputTransport(BaseInputTransport):
 
 
 class WebsocketServerOutputTransport(BaseOutputTransport):
-    def __init__(self, params: WebsocketServerParams, **kwargs):
+    def __init__(self, transport: BaseTransport, params: WebsocketServerParams, **kwargs):
         super().__init__(params, **kwargs)
 
+        self._transport = transport
         self._params = params
 
         self._websocket: Optional[websockets.WebSocketServerProtocol] = None
@@ -184,6 +195,10 @@ class WebsocketServerOutputTransport(BaseOutputTransport):
         await super().start(frame)
         await self._params.serializer.setup(frame)
         self._send_interval = (self._audio_chunk_size / self.sample_rate) / 2
+
+    async def cleanup(self):
+        await super().cleanup()
+        await self._transport.cleanup()
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -279,13 +294,15 @@ class WebsocketServerTransport(BaseTransport):
     def input(self) -> WebsocketServerInputTransport:
         if not self._input:
             self._input = WebsocketServerInputTransport(
-                self._host, self._port, self._params, self._callbacks, name=self._input_name
+                self, self._host, self._port, self._params, self._callbacks, name=self._input_name
             )
         return self._input
 
     def output(self) -> WebsocketServerOutputTransport:
         if not self._output:
-            self._output = WebsocketServerOutputTransport(self._params, name=self._output_name)
+            self._output = WebsocketServerOutputTransport(
+                self, self._params, name=self._output_name
+            )
         return self._output
 
     async def _on_client_connected(self, websocket):

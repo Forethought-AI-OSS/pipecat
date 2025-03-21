@@ -30,7 +30,7 @@ from pipecat.serializers.protobuf import ProtobufFrameSerializer
 from pipecat.transports.base_input import BaseInputTransport
 from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import BaseTransport, TransportParams
-from pipecat.utils.asyncio import TaskManager
+from pipecat.utils.asyncio import BaseTaskManager
 
 
 class WebsocketClientParams(TransportParams):
@@ -57,12 +57,12 @@ class WebsocketClientSession:
         self._callbacks = callbacks
         self._transport_name = transport_name
 
-        self._task_manager: Optional[TaskManager] = None
+        self._task_manager: Optional[BaseTaskManager] = None
 
         self._websocket: Optional[websockets.WebSocketClientProtocol] = None
 
     @property
-    def task_manager(self) -> TaskManager:
+    def task_manager(self) -> BaseTaskManager:
         if not self._task_manager:
             raise Exception(
                 f"{self._transport_name}::WebsocketClientSession: TaskManager not initialized (pipeline not started?)"
@@ -118,9 +118,15 @@ class WebsocketClientSession:
 
 
 class WebsocketClientInputTransport(BaseInputTransport):
-    def __init__(self, session: WebsocketClientSession, params: WebsocketClientParams):
+    def __init__(
+        self,
+        transport: BaseTransport,
+        session: WebsocketClientSession,
+        params: WebsocketClientParams,
+    ):
         super().__init__(params)
 
+        self._transport = transport
         self._session = session
         self._params = params
 
@@ -138,6 +144,10 @@ class WebsocketClientInputTransport(BaseInputTransport):
         await super().cancel(frame)
         await self._session.disconnect()
 
+    async def cleanup(self):
+        await super().cleanup()
+        await self._transport.cleanup()
+
     async def on_message(self, websocket, message):
         frame = await self._params.serializer.deserialize(message)
         if not frame:
@@ -149,9 +159,15 @@ class WebsocketClientInputTransport(BaseInputTransport):
 
 
 class WebsocketClientOutputTransport(BaseOutputTransport):
-    def __init__(self, session: WebsocketClientSession, params: WebsocketClientParams):
+    def __init__(
+        self,
+        transport: BaseTransport,
+        session: WebsocketClientSession,
+        params: WebsocketClientParams,
+    ):
         super().__init__(params)
 
+        self._transport = transport
         self._session = session
         self._params = params
 
@@ -177,6 +193,10 @@ class WebsocketClientOutputTransport(BaseOutputTransport):
     async def cancel(self, frame: CancelFrame):
         await super().cancel(frame)
         await self._session.disconnect()
+
+    async def cleanup(self):
+        await super().cleanup()
+        await self._transport.cleanup()
 
     async def send_message(self, frame: TransportMessageFrame | TransportMessageUrgentFrame):
         await self._write_frame(frame)
@@ -250,12 +270,12 @@ class WebsocketClientTransport(BaseTransport):
 
     def input(self) -> WebsocketClientInputTransport:
         if not self._input:
-            self._input = WebsocketClientInputTransport(self._session, self._params)
+            self._input = WebsocketClientInputTransport(self, self._session, self._params)
         return self._input
 
     def output(self) -> WebsocketClientOutputTransport:
         if not self._output:
-            self._output = WebsocketClientOutputTransport(self._session, self._params)
+            self._output = WebsocketClientOutputTransport(self, self._session, self._params)
         return self._output
 
     async def _on_connected(self, websocket):

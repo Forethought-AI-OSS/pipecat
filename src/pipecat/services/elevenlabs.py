@@ -14,22 +14,18 @@ from loguru import logger
 from pydantic import BaseModel, model_validator
 
 from pipecat.frames.frames import (
-    BotStoppedSpeakingFrame,
     CancelFrame,
     EndFrame,
     ErrorFrame,
     Frame,
-    LLMFullResponseEndFrame,
     StartFrame,
     StartInterruptionFrame,
     TTSAudioRawFrame,
-    TTSSpeakFrame,
     TTSStartedFrame,
     TTSStoppedFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
-from pipecat.services.ai_services import TTSService, WordTTSService
-from pipecat.services.websocket_service import WebsocketService
+from pipecat.services.ai_services import InterruptibleWordTTSService, TTSService
 from pipecat.transcriptions.language import Language
 
 # See .env.example for ElevenLabs configuration needed
@@ -106,6 +102,8 @@ def language_to_elevenlabs_language(language: Language) -> Optional[str]:
 
 def output_format_from_sample_rate(sample_rate: int) -> str:
     match sample_rate:
+        case 8000:
+            return "pcm_8000"
         case 16000:
             return "pcm_16000"
         case 22050:
@@ -117,7 +115,45 @@ def output_format_from_sample_rate(sample_rate: int) -> str:
     logger.warning(
         f"ElevenLabsTTSService: No output format available for {sample_rate} sample rate"
     )
-    return "pcm_16000"
+    return "pcm_24000"
+
+
+def build_elevenlabs_voice_settings(
+    settings: Dict[str, Any],
+) -> Optional[Dict[str, Union[float, bool]]]:
+    """Build voice settings dictionary for ElevenLabs based on provided settings.
+
+    Args:
+        settings: Dictionary containing voice settings parameters
+
+    Returns:
+        Dictionary of voice settings or None if required parameters are missing
+    """
+    voice_settings = {}
+    if settings["stability"] is not None and settings["similarity_boost"] is not None:
+        voice_settings["stability"] = settings["stability"]
+        voice_settings["similarity_boost"] = settings["similarity_boost"]
+        if settings["style"] is not None:
+            voice_settings["style"] = settings["style"]
+        if settings["use_speaker_boost"] is not None:
+            voice_settings["use_speaker_boost"] = settings["use_speaker_boost"]
+        if settings["speed"] is not None:
+            voice_settings["speed"] = settings["speed"]
+    else:
+        if settings["style"] is not None:
+            logger.warning(
+                "'style' is set but will not be applied because 'stability' and 'similarity_boost' are not both set."
+            )
+        if settings["use_speaker_boost"] is not None:
+            logger.warning(
+                "'use_speaker_boost' is set but will not be applied because 'stability' and 'similarity_boost' are not both set."
+            )
+        if settings["speed"] is not None:
+            logger.warning(
+                "'speed' is set but will not be applied because 'stability' and 'similarity_boost' are not both set."
+            )
+
+    return voice_settings or None
 
 
 def calculate_word_times(
@@ -141,7 +177,7 @@ def calculate_word_times(
     return word_times
 
 
-class ElevenLabsTTSService(WordTTSService, WebsocketService):
+class ElevenLabsTTSService(InterruptibleWordTTSService):
     class InputParams(BaseModel):
         language: Optional[Language] = None
         optimize_streaming_latency: Optional[str] = None
@@ -149,6 +185,7 @@ class ElevenLabsTTSService(WordTTSService, WebsocketService):
         similarity_boost: Optional[float] = None
         style: Optional[float] = None
         use_speaker_boost: Optional[bool] = None
+        speed: Optional[float] = None
         auto_mode: Optional[bool] = True
 
         @model_validator(mode="after")
@@ -186,17 +223,14 @@ class ElevenLabsTTSService(WordTTSService, WebsocketService):
         # Finally, ElevenLabs doesn't provide information on when the bot stops
         # speaking for a while, so we want the parent class to send TTSStopFrame
         # after a short period not receiving any audio.
-        WordTTSService.__init__(
-            self,
+        super().__init__(
             aggregate_sentences=True,
             push_text_frames=False,
             push_stop_frames=True,
-            stop_frame_timeout_s=2.0,
             pause_frame_processing=True,
             sample_rate=sample_rate,
             **kwargs,
         )
-        WebsocketService.__init__(self)
 
         self._api_key = api_key
         self._url = url
@@ -209,6 +243,7 @@ class ElevenLabsTTSService(WordTTSService, WebsocketService):
             "similarity_boost": params.similarity_boost,
             "style": params.style,
             "use_speaker_boost": params.use_speaker_boost,
+            "speed": params.speed,
             "auto_mode": str(params.auto_mode).lower(),
         }
         self.set_model_name(model)
@@ -221,6 +256,9 @@ class ElevenLabsTTSService(WordTTSService, WebsocketService):
         self._started = False
         self._cumulative_time = 0
 
+        self._receive_task = None
+        self._keepalive_task = None
+
     def can_generate_metrics(self) -> bool:
         return True
 
@@ -228,28 +266,7 @@ class ElevenLabsTTSService(WordTTSService, WebsocketService):
         return language_to_elevenlabs_language(language)
 
     def _set_voice_settings(self):
-        voice_settings = {}
-        if (
-            self._settings["stability"] is not None
-            and self._settings["similarity_boost"] is not None
-        ):
-            voice_settings["stability"] = self._settings["stability"]
-            voice_settings["similarity_boost"] = self._settings["similarity_boost"]
-            if self._settings["style"] is not None:
-                voice_settings["style"] = self._settings["style"]
-            if self._settings["use_speaker_boost"] is not None:
-                voice_settings["use_speaker_boost"] = self._settings["use_speaker_boost"]
-        else:
-            if self._settings["style"] is not None:
-                logger.warning(
-                    "'style' is set but will not be applied because 'stability' and 'similarity_boost' are not both set."
-                )
-            if self._settings["use_speaker_boost"] is not None:
-                logger.warning(
-                    "'use_speaker_boost' is set but will not be applied because 'stability' and 'similarity_boost' are not both set."
-                )
-
-        return voice_settings or None
+        return build_elevenlabs_voice_settings(self._settings)
 
     async def set_model(self, model: str):
         await super().set_model(model)
@@ -293,8 +310,11 @@ class ElevenLabsTTSService(WordTTSService, WebsocketService):
     async def _connect(self):
         await self._connect_websocket()
 
-        self._receive_task = self.create_task(self._receive_task_handler(self.push_error))
-        self._keepalive_task = self.create_task(self._keepalive_task_handler())
+        if not self._receive_task:
+            self._receive_task = self.create_task(self._receive_task_handler(self._report_error))
+
+        if not self._keepalive_task:
+            self._keepalive_task = self.create_task(self._keepalive_task_handler())
 
     async def _disconnect(self):
         if self._receive_task:
@@ -309,6 +329,9 @@ class ElevenLabsTTSService(WordTTSService, WebsocketService):
 
     async def _connect_websocket(self):
         try:
+            if self._websocket:
+                return
+
             logger.debug("Connecting to ElevenLabs")
 
             voice_id = self._voice_id
@@ -343,6 +366,7 @@ class ElevenLabsTTSService(WordTTSService, WebsocketService):
         except Exception as e:
             logger.error(f"{self} initialization error: {e}")
             self._websocket = None
+            await self._call_event_handler("on_connection_error", f"{e}")
 
     async def _disconnect_websocket(self):
         try:
@@ -393,7 +417,7 @@ class ElevenLabsTTSService(WordTTSService, WebsocketService):
             await self._websocket.send(json.dumps(msg))
 
     async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
-        logger.debug(f"Generating TTS: [{text}]")
+        logger.debug(f"{self}: Generating TTS [{text}]")
 
         try:
             if not self._websocket:
@@ -439,6 +463,7 @@ class ElevenLabsHttpTTSService(TTSService):
         similarity_boost: Optional[float] = None
         style: Optional[float] = None
         use_speaker_boost: Optional[bool] = None
+        speed: Optional[float] = None
 
     def __init__(
         self,
@@ -468,6 +493,7 @@ class ElevenLabsHttpTTSService(TTSService):
             "similarity_boost": params.similarity_boost,
             "style": params.style,
             "use_speaker_boost": params.use_speaker_boost,
+            "speed": params.speed,
         }
         self.set_model_name(model)
         self.set_voice(voice_id)
@@ -477,34 +503,8 @@ class ElevenLabsHttpTTSService(TTSService):
     def can_generate_metrics(self) -> bool:
         return True
 
-    def _set_voice_settings(self) -> Optional[Dict[str, Union[float, bool]]]:
-        """Configure voice settings if stability and similarity_boost are provided.
-
-        Returns:
-            Dictionary of voice settings or None if required parameters are missing.
-        """
-        voice_settings: Dict[str, Union[float, bool]] = {}
-        if (
-            self._settings["stability"] is not None
-            and self._settings["similarity_boost"] is not None
-        ):
-            voice_settings["stability"] = float(self._settings["stability"])
-            voice_settings["similarity_boost"] = float(self._settings["similarity_boost"])
-            if self._settings["style"] is not None:
-                voice_settings["style"] = float(self._settings["style"])
-            if self._settings["use_speaker_boost"] is not None:
-                voice_settings["use_speaker_boost"] = bool(self._settings["use_speaker_boost"])
-        else:
-            if self._settings["style"] is not None:
-                logger.warning(
-                    "'style' is set but will not be applied because 'stability' and 'similarity_boost' are not both set."
-                )
-            if self._settings["use_speaker_boost"] is not None:
-                logger.warning(
-                    "'use_speaker_boost' is set but will not be applied because 'stability' and 'similarity_boost' are not both set."
-                )
-
-        return voice_settings or None
+    def _set_voice_settings(self):
+        return build_elevenlabs_voice_settings(self._settings)
 
     async def start(self, frame: StartFrame):
         await super().start(frame)
@@ -519,7 +519,7 @@ class ElevenLabsHttpTTSService(TTSService):
         Yields:
             Frames containing audio data and status information
         """
-        logger.debug(f"Generating TTS: [{text}]")
+        logger.debug(f"{self}: Generating TTS [{text}]")
 
         url = f"{self._base_url}/v1/text-to-speech/{self._voice_id}/stream"
 
@@ -567,18 +567,18 @@ class ElevenLabsHttpTTSService(TTSService):
                     return
 
                 await self.start_tts_usage_metrics(text)
-                yield TTSStartedFrame()
 
-                async for chunk in response.content:
-                    if chunk:
+                # Process the streaming response
+                CHUNK_SIZE = 1024
+
+                yield TTSStartedFrame()
+                async for chunk in response.content.iter_chunked(CHUNK_SIZE):
+                    if len(chunk) > 0:
                         await self.stop_ttfb_metrics()
                         yield TTSAudioRawFrame(chunk, self.sample_rate, 1)
-
-                yield TTSStoppedFrame()
-
         except Exception as e:
             logger.error(f"Error in run_tts: {e}")
             yield ErrorFrame(error=str(e))
-
         finally:
+            await self.stop_ttfb_metrics()
             yield TTSStoppedFrame()

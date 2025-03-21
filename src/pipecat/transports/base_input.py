@@ -74,7 +74,7 @@ class BaseInputTransport(FrameProcessor):
         if self._params.audio_in_filter:
             await self._params.audio_in_filter.start(self._sample_rate)
         # Create audio input queue and task if needed.
-        if self._params.audio_in_enabled or self._params.vad_enabled:
+        if not self._audio_task and (self._params.audio_in_enabled or self._params.vad_enabled):
             self._audio_in_queue = asyncio.Queue()
             self._audio_task = self.create_task(self._audio_task_handler())
 
@@ -152,6 +152,7 @@ class BaseInputTransport(FrameProcessor):
     async def _handle_user_interruption(self, frame: Frame):
         if isinstance(frame, UserStartedSpeakingFrame):
             logger.debug("User started speaking")
+            await self.push_frame(frame)
             # Make sure we notify about interruptions quickly out-of-band.
             if self.interruptions_allowed:
                 await self._start_interruption()
@@ -161,11 +162,10 @@ class BaseInputTransport(FrameProcessor):
                 await self.push_frame(StartInterruptionFrame())
         elif isinstance(frame, UserStoppedSpeakingFrame):
             logger.debug("User stopped speaking")
+            await self.push_frame(frame)
             if self.interruptions_allowed:
                 await self._stop_interruption()
                 await self.push_frame(StopInterruptionFrame())
-
-        await self.push_frame(frame)
 
     #
     # Audio input
@@ -174,11 +174,9 @@ class BaseInputTransport(FrameProcessor):
     async def _vad_analyze(self, audio_frame: InputAudioRawFrame) -> VADState:
         state = VADState.QUIET
         if self.vad_analyzer:
-            logger.trace(f"{self}: analyzing VAD on {audio_frame}")
             state = await self.get_event_loop().run_in_executor(
                 self._executor, self.vad_analyzer.analyze_audio, audio_frame.audio
             )
-            logger.trace(f"{self}: done analyzing VAD on {audio_frame}")
         return state
 
     async def _handle_vad(self, audio_frame: InputAudioRawFrame, vad_state: VADState):

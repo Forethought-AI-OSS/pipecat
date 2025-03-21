@@ -6,7 +6,6 @@
 
 import asyncio
 import time
-import warnings
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Mapping, Optional
@@ -18,7 +17,7 @@ from daily import (
     VirtualSpeakerDevice,
 )
 from loguru import logger
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel
 
 from pipecat.audio.vad.vad_analyzer import VADAnalyzer, VADParams
 from pipecat.frames.frames import (
@@ -43,7 +42,7 @@ from pipecat.transcriptions.language import Language
 from pipecat.transports.base_input import BaseInputTransport
 from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import BaseTransport, TransportParams
-from pipecat.utils.asyncio import TaskManager
+from pipecat.utils.asyncio import BaseTaskManager
 
 try:
     from daily import CallClient, Daily, EventHandler
@@ -124,7 +123,6 @@ class DailyTranscriptionSettings(BaseModel):
 
     Attributes:
         language: ISO language code for transcription (e.g. "en").
-        tier: Deprecated. Use model instead.
         model: Transcription model to use (e.g. "nova-2-general").
         profanity_filter: Whether to filter profanity from transcripts.
         redact: Whether to redact sensitive information.
@@ -135,7 +133,6 @@ class DailyTranscriptionSettings(BaseModel):
     """
 
     language: str = "en"
-    tier: Optional[str] = None
     model: str = "nova-2-general"
     profanity_filter: bool = True
     redact: bool = False
@@ -143,16 +140,6 @@ class DailyTranscriptionSettings(BaseModel):
     punctuate: bool = True
     includeRawResponse: bool = True
     extra: Mapping[str, Any] = {"interim_results": True}
-
-    @model_validator(mode="before")
-    def check_deprecated_fields(cls, values):
-        with warnings.catch_warnings():
-            warnings.simplefilter("always")
-            if "tier" in values:
-                warnings.warn(
-                    "Field 'tier' is deprecated, use 'model' instead.", DeprecationWarning
-                )
-        return values
 
 
 class DailyParams(TransportParams):
@@ -293,7 +280,7 @@ class DailyTransportClient(EventHandler):
         self._joined_event = asyncio.Event()
         self._leave_counter = 0
 
-        self._task_manager: Optional[TaskManager] = None
+        self._task_manager: Optional[BaseTaskManager] = None
 
         # We use the executor to cleanup the client. We just do it from one
         # place, so only one thread is really needed.
@@ -328,6 +315,10 @@ class DailyTransportClient(EventHandler):
 
     def _speaker_name(self):
         return f"speaker-{self}"
+
+    @property
+    def room_url(self) -> str:
+        return self._room_url
 
     @property
     def participant_id(self) -> str:
@@ -820,13 +811,23 @@ class DailyInputTransport(BaseInputTransport):
         params: Configuration parameters.
     """
 
-    def __init__(self, client: DailyTransportClient, params: DailyParams, **kwargs):
+    def __init__(
+        self,
+        transport: BaseTransport,
+        client: DailyTransportClient,
+        params: DailyParams,
+        **kwargs,
+    ):
         super().__init__(params, **kwargs)
 
+        self._transport = transport
         self._client = client
         self._params = params
 
         self._video_renderers = {}
+
+        # Whether we have seen a StartFrame already.
+        self._initialized = False
 
         # Task that gets audio data from a device or the network and queues it
         # internally to be processed.
@@ -841,13 +842,19 @@ class DailyInputTransport(BaseInputTransport):
     def start_audio_in_streaming(self):
         # Create audio task. It reads audio frames from Daily and push them
         # internally for VAD processing.
-        if self._params.audio_in_enabled or self._params.vad_enabled:
+        if not self._audio_in_task and (self._params.audio_in_enabled or self._params.vad_enabled):
             logger.debug(f"Start receiving audio")
             self._audio_in_task = self.create_task(self._audio_in_task_handler())
 
     async def start(self, frame: StartFrame):
         # Parent start.
         await super().start(frame)
+
+        if self._initialized:
+            return
+
+        self._initialized = True
+
         # Setup client.
         await self._client.setup(frame)
         # Join the room.
@@ -881,6 +888,7 @@ class DailyInputTransport(BaseInputTransport):
     async def cleanup(self):
         await super().cleanup()
         await self._client.cleanup()
+        await self._transport.cleanup()
 
     #
     # FrameProcessor
@@ -890,7 +898,7 @@ class DailyInputTransport(BaseInputTransport):
         await super().process_frame(frame, direction)
 
         if isinstance(frame, UserImageRequestFrame):
-            await self.request_participant_image(frame.user_id)
+            await self.request_participant_image(frame)
 
     #
     # Frames
@@ -927,16 +935,16 @@ class DailyInputTransport(BaseInputTransport):
         self._video_renderers[participant_id] = {
             "framerate": framerate,
             "timestamp": 0,
-            "render_next_frame": False,
+            "render_next_frame": [],
         }
 
         await self._client.capture_participant_video(
             participant_id, self._on_participant_video_frame, framerate, video_source, color_format
         )
 
-    async def request_participant_image(self, participant_id: str):
-        if participant_id in self._video_renderers:
-            self._video_renderers[participant_id]["render_next_frame"] = True
+    async def request_participant_image(self, frame: UserImageRequestFrame):
+        if frame.user_id in self._video_renderers:
+            self._video_renderers[frame.user_id]["render_next_frame"].append(frame)
 
     async def _on_participant_video_frame(self, participant_id: str, buffer, size, format):
         render_frame = False
@@ -945,17 +953,24 @@ class DailyInputTransport(BaseInputTransport):
         prev_time = self._video_renderers[participant_id]["timestamp"]
         framerate = self._video_renderers[participant_id]["framerate"]
 
+        # Some times we render frames because of a request.
+        request_frame = None
+
         if framerate > 0:
             next_time = prev_time + 1 / framerate
             render_frame = (next_time - curr_time) < 0.1
 
         elif self._video_renderers[participant_id]["render_next_frame"]:
-            self._video_renderers[participant_id]["render_next_frame"] = False
+            request_frame = self._video_renderers[participant_id]["render_next_frame"].pop(0)
             render_frame = True
 
         if render_frame:
             frame = UserImageRawFrame(
-                user_id=participant_id, image=buffer, size=size, format=format
+                user_id=participant_id,
+                request=request_frame,
+                image=buffer,
+                size=size,
+                format=format,
             )
             await self.push_frame(frame)
             self._video_renderers[participant_id]["timestamp"] = curr_time
@@ -971,14 +986,26 @@ class DailyOutputTransport(BaseOutputTransport):
         params: Configuration parameters.
     """
 
-    def __init__(self, client: DailyTransportClient, params: DailyParams, **kwargs):
+    def __init__(
+        self, transport: BaseTransport, client: DailyTransportClient, params: DailyParams, **kwargs
+    ):
         super().__init__(params, **kwargs)
 
+        self._transport = transport
         self._client = client
+
+        # Whether we have seen a StartFrame already.
+        self._initialized = False
 
     async def start(self, frame: StartFrame):
         # Parent start.
         await super().start(frame)
+
+        if self._initialized:
+            return
+
+        self._initialized = True
+
         # Setup client.
         await self._client.setup(frame)
         # Join the room.
@@ -999,6 +1026,7 @@ class DailyOutputTransport(BaseOutputTransport):
     async def cleanup(self):
         await super().cleanup()
         await self._client.cleanup()
+        await self._transport.cleanup()
 
     async def send_message(self, frame: TransportMessageFrame | TransportMessageUrgentFrame):
         await self._client.send_message(frame)
@@ -1100,17 +1128,25 @@ class DailyTransport(BaseTransport):
 
     def input(self) -> DailyInputTransport:
         if not self._input:
-            self._input = DailyInputTransport(self._client, self._params, name=self._input_name)
+            self._input = DailyInputTransport(
+                self, self._client, self._params, name=self._input_name
+            )
         return self._input
 
     def output(self) -> DailyOutputTransport:
         if not self._output:
-            self._output = DailyOutputTransport(self._client, self._params, name=self._output_name)
+            self._output = DailyOutputTransport(
+                self, self._client, self._params, name=self._output_name
+            )
         return self._output
 
     #
     # DailyTransport
     #
+
+    @property
+    def room_url(self) -> str:
+        return self._client.room_url
 
     @property
     def participant_id(self) -> str:

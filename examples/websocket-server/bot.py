@@ -97,7 +97,7 @@ async def main():
 
     tts = CartesiaTTSService(
         api_key=os.getenv("CARTESIA_API_KEY"),
-        voice_id="79a125e8-cd45-4c13-8a67-188112f4dd22",  # British Lady
+        voice_id="71a7ad14-091c-4e8e-a314-022ece01c121",  # British Reading Lady
     )
 
     messages = [
@@ -125,7 +125,9 @@ async def main():
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
-            audio_in_sample_rate=16000, audio_out_sample_rate=16000, allow_interruptions=True
+            audio_in_sample_rate=16000,
+            audio_out_sample_rate=16000,
+            allow_interruptions=True,
         ),
     )
 

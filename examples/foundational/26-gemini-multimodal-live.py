@@ -63,7 +63,7 @@ async def main():
 
         task = PipelineTask(
             pipeline,
-            PipelineParams(
+            params=PipelineParams(
                 allow_interruptions=True,
                 enable_metrics=True,
                 enable_usage_metrics=True,
@@ -77,7 +77,7 @@ async def main():
                     LLMMessagesAppendFrame(
                         messages=[
                             {
-                                "role": "assistant",
+                                "role": "user",
                                 "content": "Greet the user.",
                             }
                         ]

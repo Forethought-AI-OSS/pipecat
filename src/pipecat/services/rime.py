@@ -14,23 +14,21 @@ from loguru import logger
 from pydantic import BaseModel
 
 from pipecat.frames.frames import (
-    BotStoppedSpeakingFrame,
     CancelFrame,
     EndFrame,
     ErrorFrame,
     Frame,
-    LLMFullResponseEndFrame,
     StartFrame,
     StartInterruptionFrame,
     TTSAudioRawFrame,
-    TTSSpeakFrame,
     TTSStartedFrame,
     TTSStoppedFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.ai_services import AudioContextWordTTSService, TTSService
-from pipecat.services.websocket_service import WebsocketService
 from pipecat.transcriptions.language import Language
+from pipecat.utils.text.base_text_aggregator import BaseTextAggregator
+from pipecat.utils.text.skip_tags_aggregator import SkipTagsAggregator
 
 try:
     import websockets
@@ -58,7 +56,7 @@ def language_to_rime_language(language: Language) -> str:
     return LANGUAGE_MAP.get(language, "eng")
 
 
-class RimeTTSService(AudioContextWordTTSService, WebsocketService):
+class RimeTTSService(AudioContextWordTTSService):
     """Text-to-Speech service using Rime's websocket API.
 
     Uses Rime's websocket JSON API to convert text to speech with word-level timing
@@ -82,6 +80,7 @@ class RimeTTSService(AudioContextWordTTSService, WebsocketService):
         model: str = "mistv2",
         sample_rate: Optional[int] = None,
         params: InputParams = InputParams(),
+        text_aggregator: Optional[BaseTextAggregator] = None,
         **kwargs,
     ):
         """Initialize Rime TTS service.
@@ -95,17 +94,15 @@ class RimeTTSService(AudioContextWordTTSService, WebsocketService):
             params: Additional configuration parameters.
         """
         # Initialize with parent class settings for proper frame handling
-        AudioContextWordTTSService.__init__(
-            self,
+        super().__init__(
             aggregate_sentences=True,
             push_text_frames=False,
             push_stop_frames=True,
-            stop_frame_timeout_s=2.0,
             pause_frame_processing=True,
             sample_rate=sample_rate,
+            text_aggregator=text_aggregator or SkipTagsAggregator([("spell(", ")")]),
             **kwargs,
         )
-        WebsocketService.__init__(self)
 
         # Store service configuration
         self._api_key = api_key
@@ -172,18 +169,24 @@ class RimeTTSService(AudioContextWordTTSService, WebsocketService):
     async def _connect(self):
         """Establish websocket connection and start receive task."""
         await self._connect_websocket()
-        self._receive_task = self.create_task(self._receive_task_handler(self.push_error))
+
+        if not self._receive_task:
+            self._receive_task = self.create_task(self._receive_task_handler(self._report_error))
 
     async def _disconnect(self):
         """Close websocket connection and clean up tasks."""
-        await self._disconnect_websocket()
         if self._receive_task:
             await self.cancel_task(self._receive_task)
             self._receive_task = None
 
+        await self._disconnect_websocket()
+
     async def _connect_websocket(self):
         """Connect to Rime websocket API with configured settings."""
         try:
+            if self._websocket:
+                return
+
             params = "&".join(f"{k}={v}" for k, v in self._settings.items())
             url = f"{self._url}?{params}"
             headers = {"Authorization": f"Bearer {self._api_key}"}
@@ -191,6 +194,7 @@ class RimeTTSService(AudioContextWordTTSService, WebsocketService):
         except Exception as e:
             logger.error(f"{self} initialization error: {e}")
             self._websocket = None
+            await self._call_event_handler("on_connection_error", f"{e}")
 
     async def _disconnect_websocket(self):
         """Close websocket connection and reset state."""
@@ -250,7 +254,9 @@ class RimeTTSService(AudioContextWordTTSService, WebsocketService):
     async def flush_audio(self):
         if not self._context_id or not self._websocket:
             return
+
         logger.trace(f"{self}: flushing audio")
+        await self._get_websocket().send(json.dumps({"text": " "}))
         self._context_id = None
 
     async def _receive_messages(self):
@@ -310,7 +316,7 @@ class RimeTTSService(AudioContextWordTTSService, WebsocketService):
         Yields:
             Frames containing audio data and timing information.
         """
-        logger.debug(f"Generating TTS: [{text}]")
+        logger.debug(f"{self}: Generating TTS [{text}]")
         try:
             if not self._websocket:
                 await self._connect()
@@ -349,7 +355,8 @@ class RimeHttpTTSService(TTSService):
         self,
         *,
         api_key: str,
-        voice_id: str = "eva",
+        voice_id: str,
+        aiohttp_session: aiohttp.ClientSession,
         model: str = "mistv2",
         sample_rate: Optional[int] = None,
         params: InputParams = InputParams(),
@@ -358,6 +365,7 @@ class RimeHttpTTSService(TTSService):
         super().__init__(sample_rate=sample_rate, **kwargs)
 
         self._api_key = api_key
+        self._session = aiohttp_session
         self._base_url = "https://users.rime.ai/v1/rime-tts"
         self._settings = {
             "speedAlpha": params.speed_alpha,
@@ -375,7 +383,7 @@ class RimeHttpTTSService(TTSService):
         return True
 
     async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
-        logger.debug(f"Generating TTS: [{text}]")
+        logger.debug(f"{self}: Generating TTS [{text}]")
 
         headers = {
             "Accept": "audio/pcm",
@@ -391,36 +399,31 @@ class RimeHttpTTSService(TTSService):
 
         try:
             await self.start_ttfb_metrics()
-            await self.start_tts_usage_metrics(text)
 
-            yield TTSStartedFrame()
+            async with self._session.post(
+                self._base_url, json=payload, headers=headers
+            ) as response:
+                if response.status != 200:
+                    error_message = f"Rime TTS error: HTTP {response.status}"
+                    logger.error(error_message)
+                    yield ErrorFrame(error=error_message)
+                    return
 
-            async with aiohttp.ClientSession() as session:
-                async with session.post(self._base_url, json=payload, headers=headers) as response:
-                    if response.status != 200:
-                        error_message = f"Rime TTS error: HTTP {response.status}"
-                        logger.error(error_message)
-                        yield ErrorFrame(error=error_message)
-                        return
+                await self.start_tts_usage_metrics(text)
 
-                    # Process the streaming response
-                    chunk_size = 8192
-                    first_chunk = True
+                yield TTSStartedFrame()
 
-                    async for chunk in response.content.iter_chunked(chunk_size):
-                        if first_chunk:
-                            await self.stop_ttfb_metrics()
-                            first_chunk = False
+                # Process the streaming response
+                CHUNK_SIZE = 1024
 
-                        if chunk:
-                            frame = TTSAudioRawFrame(chunk, self.sample_rate, 1)
-                            yield frame
-
-            yield TTSStoppedFrame()
-
+                async for chunk in response.content.iter_chunked(CHUNK_SIZE):
+                    if len(chunk) > 0:
+                        await self.stop_ttfb_metrics()
+                        frame = TTSAudioRawFrame(chunk, self.sample_rate, 1)
+                        yield frame
         except Exception as e:
             logger.exception(f"Error generating TTS: {e}")
             yield ErrorFrame(error=f"Rime TTS error: {str(e)}")
-
         finally:
+            await self.stop_ttfb_metrics()
             yield TTSStoppedFrame()

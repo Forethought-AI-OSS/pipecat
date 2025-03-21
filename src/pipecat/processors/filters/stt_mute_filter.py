@@ -23,6 +23,7 @@ from pipecat.frames.frames import (
     Frame,
     FunctionCallInProgressFrame,
     FunctionCallResultFrame,
+    InputAudioRawFrame,
     StartFrame,
     StartInterruptionFrame,
     StopInterruptionFrame,
@@ -31,7 +32,6 @@ from pipecat.frames.frames import (
     UserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-from pipecat.services.ai_services import STTService
 
 
 class STTMuteStrategy(Enum):
@@ -92,20 +92,9 @@ class STTMuteFilter(FrameProcessor):
         **kwargs: Additional arguments passed to parent class
     """
 
-    def __init__(
-        self, *, config: STTMuteConfig, stt_service: Optional[STTService] = None, **kwargs
-    ):
+    def __init__(self, *, config: STTMuteConfig, **kwargs):
         super().__init__(**kwargs)
         self._config = config
-        if stt_service is not None:
-            import warnings
-
-            warnings.warn(
-                "The stt_service parameter is deprecated and will be removed in a future version. "
-                "STTMuteFilter now manages mute state internally.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
         self._first_speech_handled = False
         self._bot_is_speaking = False
         self._function_call_in_progress = False
@@ -185,13 +174,14 @@ class STTMuteFilter(FrameProcessor):
                 StopInterruptionFrame,
                 UserStartedSpeakingFrame,
                 UserStoppedSpeakingFrame,
+                InputAudioRawFrame,
             ),
         ):
             # Only pass VAD-related frames when not muted
             if not self.is_muted:
                 await self.push_frame(frame, direction)
             else:
-                logger.debug(f"{frame.__class__.__name__} suppressed - STT currently muted")
+                logger.trace(f"{frame.__class__.__name__} suppressed - STT currently muted")
         else:
             # Pass all other frames through
             await self.push_frame(frame, direction)
