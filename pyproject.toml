@@ -26,7 +26,6 @@ dependencies = [
     "Markdown~=3.7",
     "numpy~=1.26.4",
     "Pillow~=11.1.0",
-    "protobuf~=5.29.3",
     "pydantic~=2.10.6",
     "pyloudnorm~=0.1.1",
     "resampy~=0.4.3",
@@ -93,6 +92,7 @@ ultravox = [ "transformers~=4.48.0", "vllm~=0.7.3" ]
 webrtc = [ "aiortc~=1.11.0", "opencv-python~=4.11.0.86" ]
 websocket = [ "websockets~=13.1", "fastapi~=0.115.6" ]
 whisper = [ "faster-whisper~=1.1.1" ]
+protobuf = ["protobuf~=5.29.3"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
