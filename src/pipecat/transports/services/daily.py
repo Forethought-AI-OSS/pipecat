@@ -1505,22 +1505,20 @@ class DailyTransport(BaseTransport):
 
             url = f"{self._params.api_url}/dialin/pinlessCallUpdate"
 
+            logger.info("Handling dialin-ready event")
             try:
                 async with session.post(
                     url, headers=headers, json=data, timeout=aiohttp.ClientTimeout(total=10)
                 ) as r:
                     if r.status != 200:
                         text = await r.text()
-                        logger.error(
-                            f"Unable to handle dialin-ready event (status: {r.status}, error: {text})"
-                        )
+                        await self._on_dialin_error(
+                            f"Unable to handle dialin-ready event (status: {r.status}, error: {text})")
                         return
-
                     logger.debug("Event dialin-ready was handled successfully")
-            except asyncio.TimeoutError:
-                logger.error(f"Timeout handling dialin-ready event ({url})")
             except Exception as e:
-                logger.exception(f"Error handling dialin-ready event ({url}): {e}")
+                await self._on_dialin_error(f"Error handling dialin-ready event ({url}): {e}")
+                return
 
     async def _on_dialin_connected(self, data):
         await self._call_event_handler("on_dialin_connected", data)
