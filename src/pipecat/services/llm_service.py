@@ -118,12 +118,13 @@ class LLMService(AIService):
         function_name: str,
         arguments: str,
         run_llm: bool = True,
+        skip_start_callback: bool = False,
     ):
         if not function_name in self._functions.keys() and not None in self._functions.keys():
             return
 
         task = self.create_task(
-            self._run_function_call(context, tool_call_id, function_name, arguments, run_llm)
+            self._run_function_call(context, tool_call_id, function_name, arguments, run_llm, skip_start_callback)
         )
 
         self._function_call_tasks.add((task, tool_call_id, function_name))
@@ -161,6 +162,7 @@ class LLMService(AIService):
         function_name: str,
         arguments: str,
         run_llm: bool = True,
+        skip_start_callback: bool = False,
     ):
         if function_name in self._functions.keys():
             entry = self._functions[function_name]
@@ -174,7 +176,8 @@ class LLMService(AIService):
         )
 
         # NOTE(aleix): This needs to be removed after we remove the deprecation.
-        await self.call_start_function(context, function_name)
+        if not skip_start_callback:
+            await self.call_start_function(context, function_name)
 
         # Push a SystemFrame downstream. This frame will let our assistant context aggregator
         # know that we are in the middle of a function call. Some contexts/aggregators may

@@ -184,6 +184,7 @@ class BaseOpenAILLMService(LLMService):
         function_name = ""
         arguments = ""
         tool_call_id = ""
+        message_generated = False
 
         await self.start_ttfb_metrics()
 
@@ -236,6 +237,7 @@ class BaseOpenAILLMService(LLMService):
                     # Keep iterating through the response to collect all the argument fragments
                     arguments += tool_call.function.arguments
             elif chunk.choices[0].delta.content:
+                message_generated = True
                 await self.push_frame(LLMTextFrame(chunk.choices[0].delta.content))
 
         # if we got a function name and arguments, check to see if it's a function with
@@ -260,6 +262,7 @@ class BaseOpenAILLMService(LLMService):
                         arguments=arguments,
                         tool_call_id=tool_id,
                         run_llm=run_llm,
+                        skip_start_callback=True if message_generated else False,
                     )
                 else:
                     raise OpenAIUnhandledFunctionException(
