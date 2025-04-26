@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
+import asyncio
 import base64
 import json
 import warnings
@@ -19,6 +20,7 @@ from pipecat.frames.frames import (
     InterimTranscriptionFrame,
     StartFrame,
     TranscriptionFrame,
+    TranslationFrame,
 )
 from pipecat.services.gladia.config import GladiaInputParams
 from pipecat.services.stt_service import STTService
@@ -48,8 +50,12 @@ def language_to_gladia_language(language: Language) -> Optional[str]:
         Language.AR: "ar",
         Language.AS: "as",
         Language.AZ: "az",
+        Language.BA: "ba",
+        Language.BE: "be",
         Language.BG: "bg",
         Language.BN: "bn",
+        Language.BO: "bo",
+        Language.BR: "br",
         Language.BS: "bs",
         Language.CA: "ca",
         Language.CS: "cs",
@@ -63,13 +69,16 @@ def language_to_gladia_language(language: Language) -> Optional[str]:
         Language.EU: "eu",
         Language.FA: "fa",
         Language.FI: "fi",
+        Language.FO: "fo",
         Language.FR: "fr",
-        Language.GA: "ga",
         Language.GL: "gl",
         Language.GU: "gu",
+        Language.HA: "ha",
+        Language.HAW: "haw",
         Language.HE: "he",
         Language.HI: "hi",
         Language.HR: "hr",
+        Language.HT: "ht",
         Language.HU: "hu",
         Language.HY: "hy",
         Language.ID: "id",
@@ -82,29 +91,38 @@ def language_to_gladia_language(language: Language) -> Optional[str]:
         Language.KM: "km",
         Language.KN: "kn",
         Language.KO: "ko",
+        Language.LA: "la",
+        Language.LB: "lb",
+        Language.LN: "ln",
         Language.LO: "lo",
         Language.LT: "lt",
         Language.LV: "lv",
+        Language.MG: "mg",
+        Language.MI: "mi",
         Language.MK: "mk",
         Language.ML: "ml",
         Language.MN: "mn",
         Language.MR: "mr",
         Language.MS: "ms",
         Language.MT: "mt",
-        Language.MY: "my",
+        Language.MY_MR: "mymr",
         Language.NE: "ne",
         Language.NL: "nl",
+        Language.NN: "nn",
         Language.NO: "no",
-        Language.OR: "or",
+        Language.OC: "oc",
         Language.PA: "pa",
         Language.PL: "pl",
         Language.PS: "ps",
         Language.PT: "pt",
         Language.RO: "ro",
         Language.RU: "ru",
+        Language.SA: "sa",
+        Language.SD: "sd",
         Language.SI: "si",
         Language.SK: "sk",
         Language.SL: "sl",
+        Language.SN: "sn",
         Language.SO: "so",
         Language.SQ: "sq",
         Language.SR: "sr",
@@ -113,14 +131,19 @@ def language_to_gladia_language(language: Language) -> Optional[str]:
         Language.SW: "sw",
         Language.TA: "ta",
         Language.TE: "te",
+        Language.TG: "tg",
         Language.TH: "th",
+        Language.TK: "tk",
+        Language.TL: "tl",
         Language.TR: "tr",
+        Language.TT: "tt",
         Language.UK: "uk",
         Language.UR: "ur",
         Language.UZ: "uz",
         Language.VI: "vi",
+        Language.YI: "yi",
+        Language.YO: "yo",
         Language.ZH: "zh",
-        Language.ZU: "zu",
     }
 
     result = BASE_LANGUAGES.get(language)
@@ -203,6 +226,7 @@ class GladiaSTTService(STTService):
         self._params = params
         self._websocket = None
         self._receive_task = None
+        self._keepalive_task = None
 
     def language_to_service_language(self, language: Language) -> Optional[str]:
         """Convert pipecat Language enum to Gladia's language code."""
@@ -264,16 +288,24 @@ class GladiaSTTService(STTService):
         settings = self._prepare_settings()
         response = await self._setup_gladia(settings)
         self._websocket = await websockets.connect(response["url"])
-        if not self._receive_task:
+        if self._websocket and not self._receive_task:
             self._receive_task = self.create_task(self._receive_task_handler())
+        if self._websocket and not self._keepalive_task:
+            self._keepalive_task = self.create_task(self._keepalive_task_handler())
 
     async def stop(self, frame: EndFrame):
         """Stop the Gladia STT websocket connection."""
         await super().stop(frame)
         await self._send_stop_recording()
+
+        if self._keepalive_task:
+            await self.cancel_task(self._keepalive_task)
+            self._keepalive_task = None
+
         if self._websocket:
             await self._websocket.close()
             self._websocket = None
+
         if self._receive_task:
             await self.wait_for_task(self._receive_task)
             self._receive_task = None
@@ -281,7 +313,15 @@ class GladiaSTTService(STTService):
     async def cancel(self, frame: CancelFrame):
         """Cancel the Gladia STT websocket connection."""
         await super().cancel(frame)
-        await self._websocket.close()
+
+        if self._keepalive_task:
+            await self.cancel_task(self._keepalive_task)
+            self._keepalive_task = None
+
+        if self._websocket:
+            await self._websocket.close()
+            self._websocket = None
+
         if self._receive_task:
             await self.cancel_task(self._receive_task)
             self._receive_task = None
@@ -320,6 +360,24 @@ class GladiaSTTService(STTService):
         if self._websocket and not self._websocket.closed:
             await self._websocket.send(json.dumps({"type": "stop_recording"}))
 
+    async def _keepalive_task_handler(self):
+        """Send periodic empty audio chunks to keep the connection alive."""
+        try:
+            while True:
+                # Send keepalive every 20 seconds (Gladia times out after 30 seconds)
+                await asyncio.sleep(20)
+                if self._websocket and not self._websocket.closed:
+                    # Send an empty audio chunk as keepalive
+                    empty_audio = b""
+                    await self._send_audio(empty_audio)
+                else:
+                    logger.debug("Websocket closed, stopping keepalive")
+                    break
+        except websockets.exceptions.ConnectionClosed:
+            logger.debug("Connection closed during keepalive")
+        except Exception as e:
+            logger.error(f"Error in Gladia keepalive task: {e}")
+
     async def _receive_task_handler(self):
         try:
             async for message in self._websocket:
@@ -327,16 +385,31 @@ class GladiaSTTService(STTService):
                 if content["type"] == "transcript":
                     utterance = content["data"]["utterance"]
                     confidence = utterance.get("confidence", 0)
+                    language = utterance["language"]
                     transcript = utterance["text"]
                     if confidence >= self._confidence:
                         if content["data"]["is_final"]:
                             await self.push_frame(
-                                TranscriptionFrame(transcript, "", time_now_iso8601())
+                                TranscriptionFrame(transcript, "", time_now_iso8601(), language)
                             )
                         else:
                             await self.push_frame(
-                                InterimTranscriptionFrame(transcript, "", time_now_iso8601())
+                                InterimTranscriptionFrame(
+                                    transcript, "", time_now_iso8601(), language
+                                )
                             )
+                elif content["type"] == "translation":
+                    translated_utterance = content["data"]["translated_utterance"]
+                    original_language = content["data"]["original_language"]
+                    translated_language = translated_utterance["language"]
+                    confidence = translated_utterance.get("confidence", 0)
+                    translation = translated_utterance["text"]
+                    if translated_language != original_language and confidence >= self._confidence:
+                        await self.push_frame(
+                            TranslationFrame(
+                                translation, "", time_now_iso8601(), translated_language
+                            )
+                        )
         except websockets.exceptions.ConnectionClosed:
             # Expected when closing the connection
             pass

@@ -257,6 +257,22 @@ class InterimTranscriptionFrame(TextFrame):
 
 
 @dataclass
+class TranslationFrame(TextFrame):
+    """A text frame with translated transcription data.
+
+    Will be placed in the transport's receive queue when a participant speaks.
+
+    """
+
+    user_id: str
+    timestamp: str
+    language: Optional[Language] = None
+
+    def __str__(self):
+        return f"{self.name}(user: {self.user_id}, text: [{self.text}], language: {self.language}, timestamp: {self.timestamp})"
+
+
+@dataclass
 class OpenAILLMContextAssistantTimestampFrame(DataFrame):
     """Timestamp information for assistant message in LLM context."""
 
@@ -375,25 +391,6 @@ class LLMEnablePromptCachingFrame(DataFrame):
     """A frame to enable/disable prompt caching in certain LLMs."""
 
     enable: bool
-
-
-@dataclass
-class FunctionCallResultProperties:
-    """Properties for a function call result frame."""
-
-    run_llm: Optional[bool] = None
-    on_context_updated: Optional[Callable[[], Awaitable[None]]] = None
-
-
-@dataclass
-class FunctionCallResultFrame(DataFrame):
-    """A frame containing the result of an LLM function (tool) call."""
-
-    function_name: str
-    tool_call_id: str
-    arguments: Any
-    result: Any
-    properties: Optional[FunctionCallResultProperties] = None
 
 
 @dataclass
@@ -591,6 +588,20 @@ class EmulateUserStoppedSpeakingFrame(SystemFrame):
 
 
 @dataclass
+class VADUserStartedSpeakingFrame(SystemFrame):
+    """Frame emitted when VAD detects the user has definitively started speaking."""
+
+    pass
+
+
+@dataclass
+class VADUserStoppedSpeakingFrame(SystemFrame):
+    """Frame emitted when VAD detects the user has definitively stopped speaking."""
+
+    pass
+
+
+@dataclass
 class BotInterruptionFrame(SystemFrame):
     """Emitted by when the bot should be interrupted. This will mainly cause the
     same actions as if the user interrupted except that the
@@ -650,6 +661,25 @@ class FunctionCallCancelFrame(SystemFrame):
 
     function_name: str
     tool_call_id: str
+
+
+@dataclass
+class FunctionCallResultProperties:
+    """Properties for a function call result frame."""
+
+    run_llm: Optional[bool] = None
+    on_context_updated: Optional[Callable[[], Awaitable[None]]] = None
+
+
+@dataclass
+class FunctionCallResultFrame(SystemFrame):
+    """A frame containing the result of an LLM function (tool) call."""
+
+    function_name: str
+    tool_call_id: str
+    arguments: Any
+    result: Any
+    properties: Optional[FunctionCallResultProperties] = None
 
 
 @dataclass

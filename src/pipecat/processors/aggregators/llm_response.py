@@ -6,11 +6,13 @@
 
 import asyncio
 from abc import abstractmethod
+from dataclasses import dataclass
 from typing import Dict, List, Literal, Set
 
 from loguru import logger
 
 from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     CancelFrame,
     EmulateUserStartedSpeakingFrame,
@@ -44,6 +46,16 @@ from pipecat.processors.aggregators.openai_llm_context import (
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.utils.time import time_now_iso8601
+
+
+@dataclass
+class LLMUserAggregatorParams:
+    aggregation_timeout: float = 0.5
+
+
+@dataclass
+class LLMAssistantAggregatorParams:
+    expect_stripped_words: bool = True
 
 
 class LLMFullResponseAggregator(FrameProcessor):
@@ -149,7 +161,8 @@ class BaseLLMResponseAggregator(FrameProcessor):
     @abstractmethod
     def reset(self):
         """Reset the internals of this aggregator. This should not modify the
-        internal messages."""
+        internal messages.
+        """
         pass
 
     @abstractmethod
@@ -229,15 +242,28 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
     def __init__(
         self,
         context: OpenAILLMContext,
-        aggregation_timeout: float = 1.0,
+        *,
+        params: LLMUserAggregatorParams = LLMUserAggregatorParams(),
         **kwargs,
     ):
         super().__init__(context=context, role="user", **kwargs)
-        self._aggregation_timeout = aggregation_timeout
+        self._params = params
+        if "aggregation_timeout" in kwargs:
+            import warnings
 
-        self._seen_interim_results = False
+            with warnings.catch_warnings():
+                warnings.simplefilter("always")
+                warnings.warn(
+                    "Parameter 'aggregation_timeout' is deprecated, use 'params' instead.",
+                    DeprecationWarning,
+                )
+
+            self._params.aggregation_timeout = kwargs["aggregation_timeout"]
+
         self._user_speaking = False
+        self._bot_speaking = False
         self._emulating_vad = False
+        self._seen_interim_results = False
         self._waiting_for_aggregation = False
 
         self._aggregation_event = asyncio.Event()
@@ -272,6 +298,12 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
             await self.push_frame(frame, direction)
         elif isinstance(frame, UserStoppedSpeakingFrame):
             await self._handle_user_stopped_speaking(frame)
+            await self.push_frame(frame, direction)
+        elif isinstance(frame, BotStartedSpeakingFrame):
+            await self._handle_bot_started_speaking(frame)
+            await self.push_frame(frame, direction)
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            await self._handle_bot_stopped_speaking(frame)
             await self.push_frame(frame, direction)
         elif isinstance(frame, TranscriptionFrame):
             await self._handle_transcription(frame)
@@ -328,6 +360,12 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
         if not self._seen_interim_results:
             await self.push_aggregation()
 
+    async def _handle_bot_started_speaking(self, _: BotStartedSpeakingFrame):
+        self._bot_speaking = True
+
+    async def _handle_bot_stopped_speaking(self, _: BotStoppedSpeakingFrame):
+        self._bot_speaking = False
+
     async def _handle_transcription(self, frame: TranscriptionFrame):
         text = frame.text
 
@@ -356,8 +394,10 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
     async def _aggregation_task_handler(self):
         while True:
             try:
-                await asyncio.wait_for(self._aggregation_event.wait(), self._aggregation_timeout)
-                await self._maybe_push_bot_interruption()
+                await asyncio.wait_for(
+                    self._aggregation_event.wait(), self._params.aggregation_timeout
+                )
+                await self._maybe_emulate_user_speaking()
             except asyncio.TimeoutError:
                 if not self._user_speaking:
                     await self.push_aggregation()
@@ -372,18 +412,27 @@ class LLMUserContextAggregator(LLMContextResponseAggregator):
             finally:
                 self._aggregation_event.clear()
 
-    async def _maybe_push_bot_interruption(self):
-        """If the user stopped speaking a while back and we got a transcription
-        frame we might want to interrupt the bot.
+    async def _maybe_emulate_user_speaking(self):
+        """Emulate user speaking if we got a transcription but it was not
+        detected by VAD. Only do that if the bot is not speaking.
 
         """
+        # Check if we received a transcription but VAD was not able to detect
+        # voice (e.g. when you whisper a short utterance). In that case, we need
+        # to emulate VAD (i.e. user start/stopped speaking), but we do it only
+        # if the bot is not speaking. If the bot is speaking and we really have
+        # a short utterance we don't really want to interrupt the bot.
         if not self._user_speaking and not self._waiting_for_aggregation:
-            # If we reach this case we received a transcription but VAD was not
-            # able to detect voice (e.g. when you whisper a short
-            # utterance). So, we need to emulate VAD (i.e. user start/stopped
-            # speaking).
-            await self.push_frame(EmulateUserStartedSpeakingFrame(), FrameDirection.UPSTREAM)
-            self._emulating_vad = True
+            if self._bot_speaking:
+                # If we reached this case and the bot is speaking, let's ignore
+                # what the user said.
+                logger.debug("Ignoring user speaking emulation, bot is speaking.")
+                self.reset()
+            else:
+                # The bot is not speaking so, let's trigger user speaking
+                # emulation.
+                await self.push_frame(EmulateUserStartedSpeakingFrame(), FrameDirection.UPSTREAM)
+                self._emulating_vad = True
 
 
 class LLMAssistantContextAggregator(LLMContextResponseAggregator):
@@ -393,9 +442,27 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
 
     """
 
-    def __init__(self, context: OpenAILLMContext, *, expect_stripped_words: bool = True, **kwargs):
+    def __init__(
+        self,
+        context: OpenAILLMContext,
+        *,
+        params: LLMAssistantAggregatorParams = LLMAssistantAggregatorParams(),
+        **kwargs,
+    ):
         super().__init__(context=context, role="assistant", **kwargs)
-        self._expect_stripped_words = expect_stripped_words
+        self._params = params
+
+        if "expect_stripped_words" in kwargs:
+            import warnings
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("always")
+                warnings.warn(
+                    "Parameter 'expect_stripped_words' is deprecated, use 'params' instead.",
+                    DeprecationWarning,
+                )
+
+            self._params.expect_stripped_words = kwargs["expect_stripped_words"]
 
         self._started = 0
         self._function_calls_in_progress: Dict[str, FunctionCallInProgressFrame] = {}
@@ -446,6 +513,7 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
             await self._handle_user_image_frame(frame)
         elif isinstance(frame, BotStoppedSpeakingFrame):
             await self.push_aggregation()
+            await self.push_frame(frame, direction)
         else:
             await self.push_frame(frame, direction)
 
@@ -556,7 +624,7 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
         if not self._started:
             return
 
-        if self._expect_stripped_words:
+        if self._params.expect_stripped_words:
             self._aggregation += f" {frame.text}" if self._aggregation else frame.text
         else:
             self._aggregation += frame.text
@@ -570,8 +638,14 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
 
 
 class LLMUserResponseAggregator(LLMUserContextAggregator):
-    def __init__(self, messages: List[dict] = [], **kwargs):
-        super().__init__(context=OpenAILLMContext(messages), **kwargs)
+    def __init__(
+        self,
+        messages: List[dict] = [],
+        *,
+        params: LLMUserAggregatorParams = LLMUserAggregatorParams(),
+        **kwargs,
+    ):
+        super().__init__(context=OpenAILLMContext(messages), params=params, **kwargs)
 
     async def push_aggregation(self):
         if len(self._aggregation) > 0:
@@ -586,8 +660,14 @@ class LLMUserResponseAggregator(LLMUserContextAggregator):
 
 
 class LLMAssistantResponseAggregator(LLMAssistantContextAggregator):
-    def __init__(self, messages: List[dict] = [], **kwargs):
-        super().__init__(context=OpenAILLMContext(messages), **kwargs)
+    def __init__(
+        self,
+        messages: List[dict] = [],
+        *,
+        params: LLMAssistantAggregatorParams = LLMAssistantAggregatorParams(),
+        **kwargs,
+    ):
+        super().__init__(context=OpenAILLMContext(messages), params=params, **kwargs)
 
     async def push_aggregation(self):
         if len(self._aggregation) > 0:
