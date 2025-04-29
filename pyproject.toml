@@ -95,9 +95,6 @@ protobuf = ["protobuf~=5.29.3"]
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.setuptools.package-data]
-"pipecat" = ["py.typed"]
-
 [tool.pytest.ini_options]
 addopts = "--verbose"
 testpaths = ["tests"]
