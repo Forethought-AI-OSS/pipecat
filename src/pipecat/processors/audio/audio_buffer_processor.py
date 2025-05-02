@@ -205,6 +205,13 @@ class AudioBufferProcessor(FrameProcessor):
             self._user_audio_buffer.extend(resampled)
             # Save time of frame so we can compute silence.
             self._last_user_frame_at = time.time()
+
+            # Sync the bot's buffer to the user's buffer by adding silence if needed
+            if len(self._user_audio_buffer) > len(self._bot_audio_buffer):
+                silence_size = len(self._user_audio_buffer) - len(self._bot_audio_buffer)
+                silence = b"\x00" * silence_size
+                self._bot_audio_buffer.extend(silence)
+
         elif self._recording and isinstance(frame, OutputAudioRawFrame):
             # Add silence if we need to.
             silence = self._compute_silence(self._last_bot_frame_at)
@@ -214,6 +221,12 @@ class AudioBufferProcessor(FrameProcessor):
             self._bot_audio_buffer.extend(resampled)
             # Save time of frame so we can compute silence.
             self._last_bot_frame_at = time.time()
+
+            # Sync the user's buffer to the bot's buffer by adding silence if needed
+            if len(self._bot_audio_buffer) > len(self._user_audio_buffer):
+                silence_size = len(self._bot_audio_buffer) - len(self._user_audio_buffer)
+                silence = b"\x00" * silence_size
+                self._user_audio_buffer.extend(silence)
 
     async def _call_on_audio_data_handler(self):
         if not self.has_audio() or not self._recording:
