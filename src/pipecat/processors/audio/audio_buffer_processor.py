@@ -324,7 +324,7 @@ class AudioBufferProcessor(FrameProcessor):
         quiet_time = time.time() - from_time
         # We should get audio frames very frequently. We introduce silence only
         # if there's a big enough gap of 1s.
-        if from_time == 0 or quiet_time < 1.0:
+        if from_time == 0 or quiet_time < 0.5:
             return b""
         num_bytes = int(quiet_time * self._sample_rate) * 2
         silence = b"\x00" * num_bytes
