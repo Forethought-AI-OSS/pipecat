@@ -133,12 +133,22 @@ class AudioBufferProcessor(FrameProcessor):
         Returns:
             bytes: Mixed audio data
         """
+        # Ensure buffers are the same length before interleaving/mixing
+        user_audio = bytes(self._user_audio_buffer)
+        bot_audio = bytes(self._bot_audio_buffer)
+
+        # Pad the shorter buffer with silence
+        if len(user_audio) > len(bot_audio):
+            padding = b"\x00" * (len(user_audio) - len(bot_audio))
+            bot_audio = bot_audio + padding
+        elif len(bot_audio) > len(user_audio):
+            padding = b"\x00" * (len(bot_audio) - len(user_audio))
+            user_audio = user_audio + padding
+
         if self._num_channels == 1:
-            return mix_audio(bytes(self._user_audio_buffer), bytes(self._bot_audio_buffer))
+            return mix_audio(user_audio, bot_audio)
         elif self._num_channels == 2:
-            return interleave_stereo_audio(
-                bytes(self._user_audio_buffer), bytes(self._bot_audio_buffer)
-            )
+            return interleave_stereo_audio(user_audio, bot_audio)
         else:
             return b""
 
@@ -248,6 +258,13 @@ class AudioBufferProcessor(FrameProcessor):
             self._user_audio_buffer.extend(resampled)
             # Save time of frame so we can compute silence.
             self._last_user_frame_at = time.time()
+
+            # Sync bot buffer to user buffer
+            if len(self._user_audio_buffer) > len(self._bot_audio_buffer):
+                silence_size = len(self._user_audio_buffer) - len(self._bot_audio_buffer)
+                silence = b"\x00" * silence_size
+                self._bot_audio_buffer.extend(silence)
+
         elif self._recording and isinstance(frame, OutputAudioRawFrame):
             # Add silence if we need to.
             silence = self._compute_silence(self._last_bot_frame_at)
@@ -257,6 +274,12 @@ class AudioBufferProcessor(FrameProcessor):
             self._bot_audio_buffer.extend(resampled)
             # Save time of frame so we can compute silence.
             self._last_bot_frame_at = time.time()
+
+            # Sync user buffer to bot buffer
+            if len(self._bot_audio_buffer) > len(self._user_audio_buffer):
+                silence_size = len(self._bot_audio_buffer) - len(self._user_audio_buffer)
+                silence = b"\x00" * silence_size
+                self._user_audio_buffer.extend(silence)
 
     async def _call_on_audio_data_handler(self):
         if not self.has_audio() or not self._recording:
@@ -284,8 +307,9 @@ class AudioBufferProcessor(FrameProcessor):
 
     def _reset_recording(self):
         self._reset_audio_buffers()
-        self._last_user_frame_at = time.time()
-        self._last_bot_frame_at = time.time()
+        current_time = time.time()
+        self._last_user_frame_at = current_time
+        self._last_bot_frame_at = current_time
 
     def _reset_audio_buffers(self):
         self._user_audio_buffer = bytearray()
