@@ -29,6 +29,7 @@ from pipecat.services.tts_service import AudioContextWordTTSService, TTSService
 from pipecat.transcriptions.language import Language
 from pipecat.utils.text.base_text_aggregator import BaseTextAggregator
 from pipecat.utils.text.skip_tags_aggregator import SkipTagsAggregator
+from pipecat.utils.tracing.service_decorators import traced_tts
 
 try:
     import websockets
@@ -68,16 +69,18 @@ class RimeTTSService(AudioContextWordTTSService):
         language: Optional[Language] = Language.EN
         speed_alpha: Optional[float] = 1.0
         reduce_latency: Optional[bool] = False
+        pause_between_brackets: Optional[bool] = False
+        phonemize_between_brackets: Optional[bool] = False
 
     def __init__(
         self,
         *,
         api_key: str,
         voice_id: str,
-        url: str = "wss://users-ws.rime.ai/ws2",
+        url: str = "wss://users.rime.ai/ws2",
         model: str = "mistv2",
         sample_rate: Optional[int] = None,
-        params: InputParams = InputParams(),
+        params: Optional[InputParams] = None,
         text_aggregator: Optional[BaseTextAggregator] = None,
         **kwargs,
     ):
@@ -102,6 +105,8 @@ class RimeTTSService(AudioContextWordTTSService):
             **kwargs,
         )
 
+        params = params or RimeTTSService.InputParams()
+
         # Store service configuration
         self._api_key = api_key
         self._url = url
@@ -117,6 +122,8 @@ class RimeTTSService(AudioContextWordTTSService):
             else "eng",
             "speedAlpha": params.speed_alpha,
             "reduceLatency": params.reduce_latency,
+            "pauseBetweenBrackets": json.dumps(params.pause_between_brackets),
+            "phonemizeBetweenBrackets": json.dumps(params.phonemize_between_brackets),
         }
 
         # State tracking
@@ -304,8 +311,9 @@ class RimeTTSService(AudioContextWordTTSService):
         await super().push_frame(frame, direction)
         if isinstance(frame, (TTSStoppedFrame, StartInterruptionFrame)):
             if isinstance(frame, TTSStoppedFrame):
-                await self.add_word_timestamps([("LLMFullResponseEndFrame", 0), ("Reset", 0)])
+                await self.add_word_timestamps([("Reset", 0)])
 
+    @traced_tts
     async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
         """Generate speech from text.
 
@@ -358,10 +366,12 @@ class RimeHttpTTSService(TTSService):
         aiohttp_session: aiohttp.ClientSession,
         model: str = "mistv2",
         sample_rate: Optional[int] = None,
-        params: InputParams = InputParams(),
+        params: Optional[InputParams] = None,
         **kwargs,
     ):
         super().__init__(sample_rate=sample_rate, **kwargs)
+
+        params = params or RimeHttpTTSService.InputParams()
 
         self._api_key = api_key
         self._session = aiohttp_session
@@ -381,6 +391,7 @@ class RimeHttpTTSService(TTSService):
     def can_generate_metrics(self) -> bool:
         return True
 
+    @traced_tts
     async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
         logger.debug(f"{self}: Generating TTS [{text}]")
 
@@ -395,6 +406,13 @@ class RimeHttpTTSService(TTSService):
         payload["speaker"] = self._voice_id
         payload["modelId"] = self._model_name
         payload["samplingRate"] = self.sample_rate
+
+        # Arcana does not support PCM audio
+        if payload["modelId"] == "arcana":
+            headers["Accept"] = "audio/wav"
+            need_to_strip_wav_header = True
+        else:
+            need_to_strip_wav_header = False
 
         try:
             await self.start_ttfb_metrics()
@@ -416,6 +434,10 @@ class RimeHttpTTSService(TTSService):
                 CHUNK_SIZE = 1024
 
                 async for chunk in response.content.iter_chunked(CHUNK_SIZE):
+                    if need_to_strip_wav_header and chunk.startswith(b"RIFF"):
+                        chunk = chunk[44:]
+                        need_to_strip_wav_header = False
+
                     if len(chunk) > 0:
                         await self.stop_ttfb_metrics()
                         frame = TTSAudioRawFrame(chunk, self.sample_rate, 1)

@@ -7,7 +7,6 @@
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import (
-    TYPE_CHECKING,
     Any,
     Awaitable,
     Callable,
@@ -16,19 +15,16 @@ from typing import (
     Literal,
     Mapping,
     Optional,
+    Sequence,
     Tuple,
 )
 
+from pipecat.audio.interruptions.base_interruption_strategy import BaseInterruptionStrategy
 from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.clocks.base_clock import BaseClock
 from pipecat.metrics.metrics import MetricsData
 from pipecat.transcriptions.language import Language
-from pipecat.utils.asyncio import BaseTaskManager
 from pipecat.utils.time import nanoseconds_to_str
 from pipecat.utils.utils import obj_count, obj_id
-
-if TYPE_CHECKING:
-    from pipecat.observers.base_observer import BaseObserver
 
 
 class KeypadEntry(str, Enum):
@@ -60,12 +56,16 @@ class Frame:
     name: str = field(init=False)
     pts: Optional[int] = field(init=False)
     metadata: Dict[str, Any] = field(init=False)
+    transport_source: Optional[str] = field(init=False)
+    transport_destination: Optional[str] = field(init=False)
 
     def __post_init__(self):
         self.id: int = obj_id()
         self.name: str = f"{self.__class__.__name__}#{obj_count(self)}"
         self.pts: Optional[int] = None
         self.metadata: Dict[str, Any] = {}
+        self.transport_source: Optional[str] = None
+        self.transport_destination: Optional[str] = None
 
     def __str__(self):
         return self.name
@@ -136,8 +136,9 @@ class ImageRawFrame:
 
 @dataclass
 class OutputAudioRawFrame(DataFrame, AudioRawFrame):
-    """A chunk of audio. Will be played by the output transport if the
-    transport's microphone has been enabled.
+    """A chunk of audio. Will be played by the output transport. If the
+    transport supports multiple audio destinations (e.g. multiple audio tracks) the
+    destination name can be specified.
 
     """
 
@@ -147,13 +148,14 @@ class OutputAudioRawFrame(DataFrame, AudioRawFrame):
 
     def __str__(self):
         pts = format_pts(self.pts)
-        return f"{self.name}(pts: {pts}, size: {len(self.audio)}, frames: {self.num_frames}, sample_rate: {self.sample_rate}, channels: {self.num_channels})"
+        return f"{self.name}(pts: {pts}, destination: {self.transport_destination}, size: {len(self.audio)}, frames: {self.num_frames}, sample_rate: {self.sample_rate}, channels: {self.num_channels})"
 
 
 @dataclass
 class OutputImageRawFrame(DataFrame, ImageRawFrame):
-    """An image that will be shown by the transport if the transport's camera is
-    enabled.
+    """An image that will be shown by the transport. If the transport supports
+    multiple video destinations (e.g. multiple video tracks) the destination
+    name can be specified.
 
     """
 
@@ -176,7 +178,7 @@ class URLImageRawFrame(OutputImageRawFrame):
 
     """
 
-    url: Optional[str]
+    url: Optional[str] = None
 
     def __str__(self):
         pts = format_pts(self.pts)
@@ -228,14 +230,15 @@ class TTSTextFrame(TextFrame):
 
 @dataclass
 class TranscriptionFrame(TextFrame):
-    """A text frame with transcription-specific data. Will be placed in the
-    transport's receive queue when a participant speaks.
+    """A text frame with transcription-specific data. The `result` field
+    contains the result from the STT service if available.
 
     """
 
     user_id: str
     timestamp: str
     language: Optional[Language] = None
+    result: Optional[Any] = None
 
     def __str__(self):
         return f"{self.name}(user: {self.user_id}, text: [{self.text}], language: {self.language}, timestamp: {self.timestamp})"
@@ -243,14 +246,16 @@ class TranscriptionFrame(TextFrame):
 
 @dataclass
 class InterimTranscriptionFrame(TextFrame):
-    """A text frame with interim transcription-specific data. Will be placed in
-    the transport's receive queue when a participant speaks.
+    """A text frame with interim transcription-specific data. The `result` field
+    contains the result from the STT service if available.
+
     """
 
     text: str
     user_id: str
     timestamp: str
     language: Optional[Language] = None
+    result: Optional[Any] = None
 
     def __str__(self):
         return f"{self.name}(user: {self.user_id}, text: [{self.text}], language: {self.language}, timestamp: {self.timestamp})"
@@ -288,6 +293,7 @@ class TranscriptionMessage:
 
     role: Literal["user", "assistant"]
     content: str
+    user_id: Optional[str] = None
     timestamp: Optional[str] = None
 
 
@@ -412,22 +418,19 @@ class TransportMessageFrame(DataFrame):
 
 
 @dataclass
-class DTMFFrame(DataFrame):
+class DTMFFrame:
     """A DTMF button frame"""
 
     button: KeypadEntry
 
 
 @dataclass
-class InputDTMFFrame(DTMFFrame):
-    """A DTMF button input"""
+class OutputDTMFFrame(DTMFFrame, DataFrame):
+    """A DTMF keypress output that will be queued. If your transport supports
+    multiple dial-out destinations, use the `transport_destination` field to
+    specify where the DTMF keypress should be sent.
 
-    pass
-
-
-@dataclass
-class OutputDTMFFrame(DTMFFrame):
-    """A DTMF button output"""
+    """
 
     pass
 
@@ -441,15 +444,13 @@ class OutputDTMFFrame(DTMFFrame):
 class StartFrame(SystemFrame):
     """This is the first frame that should be pushed down a pipeline."""
 
-    clock: BaseClock
-    task_manager: BaseTaskManager
     audio_in_sample_rate: int = 16000
     audio_out_sample_rate: int = 24000
     allow_interruptions: bool = False
     enable_metrics: bool = False
     enable_usage_metrics: bool = False
-    observer: Optional["BaseObserver"] = None
     report_only_initial_ttfb: bool = False
+    interruption_strategies: List[BaseInterruptionStrategy] = field(default_factory=list)
 
 
 @dataclass
@@ -646,6 +647,32 @@ class MetricsFrame(SystemFrame):
 
 
 @dataclass
+class FunctionCallFromLLM:
+    """Represents a function call returned by the LLM to be registered for execution.
+
+    Attributes:
+        function_name (str): The name of the function.
+        tool_call_id (str): A unique identifier for the function call.
+        arguments (Mapping[str, Any]): The arguments for the function.
+        context (OpenAILLMContext): The LLM context.
+
+    """
+
+    function_name: str
+    tool_call_id: str
+    arguments: Mapping[str, Any]
+    context: Any
+
+
+@dataclass
+class FunctionCallsStartedFrame(SystemFrame):
+    """A frame signaling that one or more function call execution is going to
+    start."""
+
+    function_calls: Sequence[FunctionCallFromLLM]
+
+
+@dataclass
 class FunctionCallInProgressFrame(SystemFrame):
     """A frame signaling that a function call is in progress."""
 
@@ -679,6 +706,7 @@ class FunctionCallResultFrame(SystemFrame):
     tool_call_id: str
     arguments: Any
     result: Any
+    run_llm: Optional[bool] = None
     properties: Optional[FunctionCallResultProperties] = None
 
 
@@ -709,14 +737,19 @@ class UserImageRequestFrame(SystemFrame):
     context: Optional[Any] = None
     function_name: Optional[str] = None
     tool_call_id: Optional[str] = None
+    video_source: Optional[str] = None
 
     def __str__(self):
-        return f"{self.name}(user: {self.user_id}, function: {self.function_name}, request: {self.tool_call_id})"
+        return f"{self.name}(user: {self.user_id}, video_source: {self.video_source}, function: {self.function_name}, request: {self.tool_call_id})"
 
 
 @dataclass
 class InputAudioRawFrame(SystemFrame, AudioRawFrame):
-    """A chunk of audio usually coming from an input transport."""
+    """A chunk of audio usually coming from an input transport. If the transport
+    supports multiple audio sources (e.g. multiple audio tracks) the source name
+    will be specified.
+
+    """
 
     def __post_init__(self):
         super().__post_init__()
@@ -724,39 +757,72 @@ class InputAudioRawFrame(SystemFrame, AudioRawFrame):
 
     def __str__(self):
         pts = format_pts(self.pts)
-        return f"{self.name}(pts: {pts}, size: {len(self.audio)}, frames: {self.num_frames}, sample_rate: {self.sample_rate}, channels: {self.num_channels})"
+        return f"{self.name}(pts: {pts}, source: {self.transport_source}, size: {len(self.audio)}, frames: {self.num_frames}, sample_rate: {self.sample_rate}, channels: {self.num_channels})"
 
 
 @dataclass
 class InputImageRawFrame(SystemFrame, ImageRawFrame):
-    """An image usually coming from an input transport."""
+    """An image usually coming from an input transport. If the transport
+    supports multiple video sources (e.g. multiple video tracks) the source name
+    will be specified.
+
+    """
 
     def __str__(self):
         pts = format_pts(self.pts)
-        return f"{self.name}(pts: {pts}, size: {self.size}, format: {self.format})"
+        return f"{self.name}(pts: {pts}, source: {self.transport_source}, size: {self.size}, format: {self.format})"
+
+
+@dataclass
+class UserAudioRawFrame(InputAudioRawFrame):
+    """A chunk of audio, usually coming from an input transport, associated to a user."""
+
+    user_id: str = ""
+
+    def __str__(self):
+        pts = format_pts(self.pts)
+        return f"{self.name}(pts: {pts}, user: {self.user_id}, source: {self.transport_source}, size: {len(self.audio)}, frames: {self.num_frames}, sample_rate: {self.sample_rate}, channels: {self.num_channels})"
 
 
 @dataclass
 class UserImageRawFrame(InputImageRawFrame):
     """An image associated to a user."""
 
-    user_id: str
+    user_id: str = ""
     request: Optional[UserImageRequestFrame] = None
 
     def __str__(self):
         pts = format_pts(self.pts)
-        return f"{self.name}(pts: {pts}, user: {self.user_id}, size: {self.size}, format: {self.format}, request: {self.request})"
+        return f"{self.name}(pts: {pts}, user: {self.user_id}, source: {self.transport_source}, size: {self.size}, format: {self.format}, request: {self.request})"
 
 
 @dataclass
 class VisionImageRawFrame(InputImageRawFrame):
     """An image with an associated text to ask for a description of it."""
 
-    text: Optional[str]
+    text: Optional[str] = None
 
     def __str__(self):
         pts = format_pts(self.pts)
         return f"{self.name}(pts: {pts}, text: [{self.text}], size: {self.size}, format: {self.format})"
+
+
+@dataclass
+class InputDTMFFrame(DTMFFrame, SystemFrame):
+    """A DTMF keypress input."""
+
+    pass
+
+
+@dataclass
+class OutputDTMFUrgentFrame(DTMFFrame, SystemFrame):
+    """A DTMF keypress output that will be sent right away. If your transport
+    supports multiple dial-out destinations, use the `transport_destination`
+    field to specify where the DTMF keypress should be sent.
+
+    """
+
+    pass
 
 
 #

@@ -12,7 +12,12 @@ from typing import Optional
 import numpy as np
 from loguru import logger
 
-from pipecat.frames.frames import InputAudioRawFrame, OutputImageRawFrame, StartFrame
+from pipecat.frames.frames import (
+    InputAudioRawFrame,
+    OutputAudioRawFrame,
+    OutputImageRawFrame,
+    StartFrame,
+)
 from pipecat.transports.base_input import BaseInputTransport
 from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import BaseTransport, TransportParams
@@ -67,6 +72,8 @@ class TkInputTransport(BaseInputTransport):
             input_device_index=self._params.audio_input_device_index,
         )
         self._in_stream.start_stream()
+
+        await self.set_transport_ready(frame)
 
     async def cleanup(self):
         await super().cleanup()
@@ -124,6 +131,8 @@ class TkOutputTransport(BaseOutputTransport):
         )
         self._out_stream.start_stream()
 
+        await self.set_transport_ready(frame)
+
     async def cleanup(self):
         await super().cleanup()
         if self._out_stream:
@@ -131,13 +140,13 @@ class TkOutputTransport(BaseOutputTransport):
             self._out_stream.close()
             self._out_stream = None
 
-    async def write_raw_audio_frames(self, frames: bytes):
+    async def write_audio_frame(self, frame: OutputAudioRawFrame):
         if self._out_stream:
             await self.get_event_loop().run_in_executor(
-                self._executor, self._out_stream.write, frames
+                self._executor, self._out_stream.write, frame.audio
             )
 
-    async def write_raw_video_frame(self, frame: OutputImageRawFrame):
+    async def write_video_frame(self, frame: OutputImageRawFrame):
         self.get_event_loop().call_soon(self._write_frame_to_tk, frame)
 
     def _write_frame_to_tk(self, frame: OutputImageRawFrame):

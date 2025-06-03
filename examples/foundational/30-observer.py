@@ -14,27 +14,34 @@ from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
-    Frame,
+    EndFrame,
     StartInterruptionFrame,
+    TTSTextFrame,
+    UserStartedSpeakingFrame,
 )
-from pipecat.observers.base_observer import BaseObserver
+from pipecat.observers.base_observer import BaseObserver, FramePushed
+from pipecat.observers.loggers.debug_log_observer import DebugLogObserver, FrameEndpoint
 from pipecat.observers.loggers.llm_log_observer import LLMLogObserver
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
-from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
-from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.processors.aggregators.openai_llm_context import (
+    OpenAILLMContext,
+)
+from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
-from pipecat.transports.base_transport import TransportParams
-from pipecat.transports.network.small_webrtc import SmallWebRTCTransport
-from pipecat.transports.network.webrtc_connection import SmallWebRTCConnection
+from pipecat.transports.base_input import BaseInputTransport
+from pipecat.transports.base_output import BaseOutputTransport
+from pipecat.transports.base_transport import BaseTransport, TransportParams
+from pipecat.transports.network.fastapi_websocket import FastAPIWebsocketParams
+from pipecat.transports.services.daily import DailyParams
 
 load_dotenv(override=True)
 
 
-class DebugObserver(BaseObserver):
+class CustomObserver(BaseObserver):
     """Observer to log interruptions and bot speaking events to the console.
 
     Logs all frame instances of:
@@ -46,21 +53,20 @@ class DebugObserver(BaseObserver):
     Log format: [EVENT TYPE]: [source processor] → [destination processor] at [timestamp]s
     """
 
-    async def on_push_frame(
-        self,
-        src: FrameProcessor,
-        dst: FrameProcessor,
-        frame: Frame,
-        direction: FrameDirection,
-        timestamp: int,
-    ):
+    async def on_push_frame(self, data: FramePushed):
+        src = data.source
+        dst = data.destination
+        frame = data.frame
+        direction = data.direction
+        timestamp = data.timestamp
+
         # Convert timestamp to seconds for readability
         time_sec = timestamp / 1_000_000_000
 
         # Create direction arrow
         arrow = "→" if direction == FrameDirection.DOWNSTREAM else "←"
 
-        if isinstance(frame, StartInterruptionFrame):
+        if isinstance(frame, StartInterruptionFrame) and isinstance(src, BaseOutputTransport):
             logger.info(f"⚡ INTERRUPTION START: {src} {arrow} {dst} at {time_sec:.2f}s")
         elif isinstance(frame, BotStartedSpeakingFrame):
             logger.info(f"🤖 BOT START SPEAKING: {src} {arrow} {dst} at {time_sec:.2f}s")
@@ -68,17 +74,30 @@ class DebugObserver(BaseObserver):
             logger.info(f"🤖 BOT STOP SPEAKING: {src} {arrow} {dst} at {time_sec:.2f}s")
 
 
-async def run_bot(webrtc_connection: SmallWebRTCConnection, _: argparse.Namespace):
-    logger.info(f"Starting bot")
+# We store functions so objects (e.g. SileroVADAnalyzer) don't get
+# instantiated. The function will be called when the desired transport gets
+# selected.
+transport_params = {
+    "daily": lambda: DailyParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+        vad_analyzer=SileroVADAnalyzer(),
+    ),
+    "twilio": lambda: FastAPIWebsocketParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+        vad_analyzer=SileroVADAnalyzer(),
+    ),
+    "webrtc": lambda: TransportParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+        vad_analyzer=SileroVADAnalyzer(),
+    ),
+}
 
-    transport = SmallWebRTCTransport(
-        webrtc_connection=webrtc_connection,
-        params=TransportParams(
-            audio_in_enabled=True,
-            audio_out_enabled=True,
-            vad_analyzer=SileroVADAnalyzer(),
-        ),
-    )
+
+async def run_example(transport: BaseTransport, _: argparse.Namespace, handle_sigint: bool):
+    logger.info(f"Starting bot")
 
     stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
 
@@ -119,7 +138,17 @@ async def run_bot(webrtc_connection: SmallWebRTCConnection, _: argparse.Namespac
             enable_usage_metrics=True,
             report_only_initial_ttfb=True,
         ),
-        observers=[DebugObserver(), LLMLogObserver()],
+        observers=[
+            CustomObserver(),
+            LLMLogObserver(),
+            DebugLogObserver(
+                frame_types={
+                    TTSTextFrame: (BaseOutputTransport, FrameEndpoint.DESTINATION),
+                    UserStartedSpeakingFrame: (BaseInputTransport, FrameEndpoint.SOURCE),
+                    EndFrame: None,
+                }
+            ),
+        ],
     )
 
     @transport.event_handler("on_client_connected")
@@ -132,18 +161,14 @@ async def run_bot(webrtc_connection: SmallWebRTCConnection, _: argparse.Namespac
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
         logger.info(f"Client disconnected")
-
-    @transport.event_handler("on_client_closed")
-    async def on_client_closed(transport, client):
-        logger.info(f"Client closed connection")
         await task.cancel()
 
-    runner = PipelineRunner(handle_sigint=False)
+    runner = PipelineRunner(handle_sigint=handle_sigint)
 
     await runner.run(task)
 
 
 if __name__ == "__main__":
-    from run import main
+    from pipecat.examples.run import main
 
-    main()
+    main(run_example, transport_params=transport_params)
