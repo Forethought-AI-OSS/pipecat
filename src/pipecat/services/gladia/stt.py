@@ -374,7 +374,7 @@ class GladiaSTTService(STTService):
         await self._websocket.send(json.dumps(message))
 
     async def _send_stop_recording(self):
-        if self._websocket and not self._websocket.closed:
+        if self._websocket and not self._websocket.state == websockets.protocol.State.CLOSED:
             await self._websocket.send(json.dumps({"type": "stop_recording"}))
 
     async def _keepalive_task_handler(self):
@@ -383,7 +383,7 @@ class GladiaSTTService(STTService):
             while True:
                 # Send keepalive every 20 seconds (Gladia times out after 30 seconds)
                 await asyncio.sleep(20)
-                if self._websocket and not self._websocket.closed:
+                if self._websocket and not self._websocket.state == websockets.protocol.State.CLOSED:
                     # Send an empty audio chunk as keepalive
                     empty_audio = b""
                     await self._send_audio(empty_audio)
