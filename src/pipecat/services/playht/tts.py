@@ -277,7 +277,7 @@ class PlayHTTTSService(InterruptibleTTSService):
 
         try:
             # Reconnect if the websocket is closed
-            if not self._websocket or self._websocket.closed:
+            if not self._websocket or self._websocket.state == websockets.protocol.State.CLOSED:
                 await self._connect()
 
             if not self._request_id:
