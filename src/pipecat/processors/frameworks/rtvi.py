@@ -13,7 +13,6 @@ and frame observation for the RTVI protocol.
 
 import asyncio
 import base64
-import time
 from dataclasses import dataclass
 from typing import (
     Any,
@@ -30,7 +29,6 @@ from typing import (
 from loguru import logger
 from pydantic import BaseModel, Field, PrivateAttr, ValidationError
 
-from pipecat.audio.utils import calculate_audio_volume
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
@@ -42,7 +40,6 @@ from pipecat.frames.frames import (
     Frame,
     FunctionCallResultFrame,
     InputAudioRawFrame,
-    InputTransportMessageUrgentFrame,
     InterimTranscriptionFrame,
     LLMConfigureOutputFrame,
     LLMContextFrame,
@@ -51,11 +48,10 @@ from pipecat.frames.frames import (
     LLMMessagesAppendFrame,
     LLMTextFrame,
     MetricsFrame,
-    OutputTransportMessageUrgentFrame,
     StartFrame,
     SystemFrame,
     TranscriptionFrame,
-    TTSAudioRawFrame,
+    TransportMessageUrgentFrame,
     TTSStartedFrame,
     TTSStoppedFrame,
     TTSTextFrame,
@@ -843,28 +839,6 @@ class RTVIServerMessage(BaseModel):
     data: Any
 
 
-class RTVIAudioLevelMessageData(BaseModel):
-    """Data format for sending audio levels."""
-
-    value: float
-
-
-class RTVIUserAudioLevelMessage(BaseModel):
-    """Message indicating user audio level."""
-
-    label: RTVIMessageLiteral = RTVI_MESSAGE_LABEL
-    type: Literal["user-audio-level"] = "user-audio-level"
-    data: RTVIAudioLevelMessageData
-
-
-class RTVIBotAudioLevelMessage(BaseModel):
-    """Message indicating bot audio level."""
-
-    label: RTVIMessageLiteral = RTVI_MESSAGE_LABEL
-    type: Literal["bot-audio-level"] = "bot-audio-level"
-    data: RTVIAudioLevelMessageData
-
-
 @dataclass
 class RTVIServerMessageFrame(SystemFrame):
     """A frame for sending server messages to the client.
@@ -888,27 +862,21 @@ class RTVIObserverParams:
         bot_llm_enabled: Indicates if the bot's LLM messages should be sent.
         bot_tts_enabled: Indicates if the bot's TTS messages should be sent.
         bot_speaking_enabled: Indicates if the bot's started/stopped speaking messages should be sent.
-        bot_audio_level_enabled: Indicates if bot's audio level messages should be sent.
         user_llm_enabled: Indicates if the user's LLM input messages should be sent.
         user_speaking_enabled: Indicates if the user's started/stopped speaking messages should be sent.
         user_transcription_enabled: Indicates if user's transcription messages should be sent.
-        user_audio_level_enabled: Indicates if user's audio level messages should be sent.
         metrics_enabled: Indicates if metrics messages should be sent.
         errors_enabled: [Deprecated] Indicates if errors messages should be sent.
-        audio_level_period_secs: How often audio levels should be sent if enabled.
     """
 
     bot_llm_enabled: bool = True
     bot_tts_enabled: bool = True
     bot_speaking_enabled: bool = True
-    bot_audio_level_enabled: bool = False
     user_llm_enabled: bool = True
     user_speaking_enabled: bool = True
     user_transcription_enabled: bool = True
-    user_audio_level_enabled: bool = False
     metrics_enabled: bool = True
     errors_enabled: bool = True
-    audio_level_period_secs: float = 0.15
 
 
 class RTVIObserver(BaseObserver):
@@ -940,12 +908,8 @@ class RTVIObserver(BaseObserver):
         super().__init__(**kwargs)
         self._rtvi = rtvi
         self._params = params or RTVIObserverParams()
-
-        self._frames_seen = set()
-
         self._bot_transcription = ""
-        self._last_user_audio_level = 0
-        self._last_bot_audio_level = 0
+        self._frames_seen = set()
 
     async def send_rtvi_message(self, model: BaseModel, exclude_none: bool = True):
         """Send an RTVI message.
@@ -1026,22 +990,6 @@ class RTVIObserver(BaseObserver):
                 await self._send_error_response(frame)
             else:
                 await self._send_server_response(frame)
-        elif isinstance(frame, InputAudioRawFrame) and self._params.user_audio_level_enabled:
-            curr_time = time.time()
-            diff_time = curr_time - self._last_user_audio_level
-            if diff_time > self._params.audio_level_period_secs:
-                level = calculate_audio_volume(frame.audio, frame.sample_rate)
-                message = RTVIUserAudioLevelMessage(data=RTVIAudioLevelMessageData(value=level))
-                await self.send_rtvi_message(message)
-                self._last_user_audio_level = curr_time
-        elif isinstance(frame, TTSAudioRawFrame) and self._params.bot_audio_level_enabled:
-            curr_time = time.time()
-            diff_time = curr_time - self._last_bot_audio_level
-            if diff_time > self._params.audio_level_period_secs:
-                level = calculate_audio_volume(frame.audio, frame.sample_rate)
-                message = RTVIBotAudioLevelMessage(data=RTVIAudioLevelMessageData(value=level))
-                await self.send_rtvi_message(message)
-                self._last_bot_audio_level = curr_time
 
         if mark_as_seen:
             self._frames_seen.add(frame.id)
@@ -1310,9 +1258,7 @@ class RTVIProcessor(FrameProcessor):
 
     async def push_transport_message(self, model: BaseModel, exclude_none: bool = True):
         """Push a transport message frame."""
-        frame = OutputTransportMessageUrgentFrame(
-            message=model.model_dump(exclude_none=exclude_none)
-        )
+        frame = TransportMessageUrgentFrame(message=model.model_dump(exclude_none=exclude_none))
         await self.push_frame(frame)
 
     async def handle_message(self, message: RTVIMessage):
@@ -1385,7 +1331,7 @@ class RTVIProcessor(FrameProcessor):
         elif isinstance(frame, ErrorFrame):
             await self._send_error_frame(frame)
             await self.push_frame(frame, direction)
-        elif isinstance(frame, InputTransportMessageUrgentFrame):
+        elif isinstance(frame, TransportMessageUrgentFrame):
             await self._handle_transport_message(frame)
         # All other system frames
         elif isinstance(frame, SystemFrame):
@@ -1448,7 +1394,7 @@ class RTVIProcessor(FrameProcessor):
             await self._handle_message(message)
             self._message_queue.task_done()
 
-    async def _handle_transport_message(self, frame: InputTransportMessageUrgentFrame):
+    async def _handle_transport_message(self, frame: TransportMessageUrgentFrame):
         """Handle an incoming transport message frame."""
         try:
             transport_message = frame.message
