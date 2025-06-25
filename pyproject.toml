@@ -25,8 +25,8 @@ dependencies = [
     "loguru~=0.7.3",
     "Markdown~=3.7",
     "numpy~=1.26.4",
-    "Pillow~=11.1.0",
-    "pydantic~=2.10.6",
+    "Pillow~=10.4.0",
+    "pydantic~=2.10.3",
     "pyloudnorm~=0.1.1",
     "resampy~=0.4.3",
     "soxr~=0.5.0",
@@ -96,10 +96,6 @@ protobuf = ["protobuf~=5.29.3"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.package-data]
-"pipecat" = ["py.typed"]
-"pipecat.services.aws_nova_sonic" = ["src/pipecat/services/aws_nova_sonic/ready.wav"]
 
 [tool.pytest.ini_options]
 addopts = "--verbose"
