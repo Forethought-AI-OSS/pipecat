@@ -124,7 +124,7 @@ class CartesiaSTTService(STTService):
 
     async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
         # If the connection is closed, due to timeout, we need to reconnect when the user starts speaking again
-        if not self._connection or self._connection.state == websockets.protocol.State.CLOSED:
+        if not self._connection or self._connection.closed:
             await self._connect()
 
         await self._connection.send(audio)
@@ -148,7 +148,7 @@ class CartesiaSTTService(STTService):
     async def _receive_messages(self):
         try:
             while True:
-                if not self._connection or self._connection.state == websockets.protocol.State.CLOSED:
+                if not self._connection or self._connection.closed:
                     break
 
                 message = await self._connection.recv()

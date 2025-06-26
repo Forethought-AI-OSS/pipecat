@@ -175,7 +175,7 @@ class WebsocketServerInputTransport(BaseInputTransport):
         """
         try:
             await asyncio.sleep(session_timeout)
-            if not websocket.state == websockets.protocol.State.CLOSED:
+            if not websocket.closed:
                 await self._callbacks.on_session_timeout(websocket)
         except asyncio.CancelledError:
             logger.info(f"Monitoring task cancelled for: {websocket.remote_address}")
