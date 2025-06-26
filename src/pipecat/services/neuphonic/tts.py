@@ -247,7 +247,7 @@ class NeuphonicTTSService(InterruptibleTTSService):
         logger.debug(f"Generating TTS: [{text}]")
 
         try:
-            if not self._websocket or self._websocket.state == websockets.protocol.State.CLOSED:
+            if not self._websocket or self._websocket.closed:
                 await self._connect()
 
             try:
