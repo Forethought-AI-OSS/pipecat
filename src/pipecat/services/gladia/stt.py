@@ -361,7 +361,7 @@ class GladiaSTTService(STTService):
                 logger.warning(f"Audio buffer exceeded max size, trimmed {trim_size} bytes")
 
         # Send audio if connected
-        if self._connection_active and self._websocket and not self._websocket.closed:
+        if self._connection_active and self._websocket and not self._websocket.state == websockets.protocol.State.CLOSED:
             try:
                 await self._send_audio(audio)
             except websockets.exceptions.ConnectionClosed as e:
@@ -466,7 +466,7 @@ class GladiaSTTService(STTService):
 
     async def _send_audio(self, audio: bytes):
         """Send audio chunk with proper message format."""
-        if self._websocket and not self._websocket.closed:
+        if self._websocket and not self._websocket.state == websockets.protocol.State.CLOSED:
             data = base64.b64encode(audio).decode("utf-8")
             message = {"type": "audio_chunk", "data": {"chunk": data}}
             await self._websocket.send(json.dumps(message))
@@ -479,7 +479,7 @@ class GladiaSTTService(STTService):
                 await self._send_audio(bytes(self._audio_buffer))
 
     async def _send_stop_recording(self):
-        if self._websocket and not self._websocket.closed:
+        if self._websocket and not self._websocket.state == websockets.protocol.State.CLOSED:
             await self._websocket.send(json.dumps({"type": "stop_recording"}))
 
     async def _keepalive_task_handler(self):
@@ -490,7 +490,7 @@ class GladiaSTTService(STTService):
                 self.reset_watchdog()
                 # Send keepalive (Gladia times out after 30 seconds)
                 await asyncio.sleep(KEEPALIVE_SLEEP)
-                if self._websocket and not self._websocket.closed:
+                if self._websocket and not self._websocket.state == websockets.protocol.State.CLOSED:
                     # Send an empty audio chunk as keepalive
                     empty_audio = b""
                     await self._send_audio(empty_audio)

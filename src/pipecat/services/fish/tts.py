@@ -155,7 +155,7 @@ class FishAudioTTSService(InterruptibleTTSService):
     async def flush_audio(self):
         """Flush any buffered audio by sending a flush event to Fish Audio."""
         logger.trace(f"{self}: Flushing audio buffers")
-        if not self._websocket or self._websocket.closed:
+        if not self._websocket or self._websocket.state == websockets.protocol.State.CLOSED:
             return
         flush_message = {"event": "flush"}
         await self._get_websocket().send(ormsgpack.packb(flush_message))
@@ -193,7 +193,7 @@ class FishAudioTTSService(InterruptibleTTSService):
     async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
         logger.debug(f"{self}: Generating Fish TTS: [{text}]")
         try:
-            if not self._websocket or self._websocket.closed:
+            if not self._websocket or self._websocket.state == websockets.protocol.State.CLOSED:
                 await self._connect()
 
             if not self._request_id:

@@ -41,7 +41,7 @@ class WebsocketService(ABC):
             True if connection is verified working, False otherwise.
         """
         try:
-            if not self._websocket or self._websocket.closed:
+            if not self._websocket or self._websocket.state == websockets.protocol.State.CLOSED:
                 return False
             await self._websocket.ping()
             return True
