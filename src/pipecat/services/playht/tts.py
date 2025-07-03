@@ -12,6 +12,7 @@ from typing import AsyncGenerator, Optional
 
 import aiohttp
 import websockets
+import websockets.protocol
 from loguru import logger
 from pydantic import BaseModel
 

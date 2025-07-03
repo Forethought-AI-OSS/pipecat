@@ -38,6 +38,7 @@ from pipecat.utils.tracing.service_decorators import traced_tts
 # See .env.example for ElevenLabs configuration needed
 try:
     import websockets
+    import websockets.protocol
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error("In order to use ElevenLabs, you need to `pip install pipecat-ai[elevenlabs]`.")

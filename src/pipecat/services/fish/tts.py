@@ -29,6 +29,7 @@ from pipecat.utils.tracing.service_decorators import traced_tts
 try:
     import ormsgpack
     import websockets
+    import websockets.protocol
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error("In order to use Fish Audio, you need to `pip install pipecat-ai[fish]`.")

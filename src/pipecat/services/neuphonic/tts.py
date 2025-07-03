@@ -34,6 +34,7 @@ from pipecat.utils.tracing.service_decorators import traced_tts
 
 try:
     import websockets
+    import websockets.protocol
     from pyneuphonic import Neuphonic, TTSConfig
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")

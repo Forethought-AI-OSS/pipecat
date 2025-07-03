@@ -32,6 +32,7 @@ from pipecat.transports.base_transport import BaseTransport, TransportParams
 
 try:
     import websockets
+    import websockets.protocol
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error("In order to use websockets, you need to `pip install pipecat-ai[websocket]`.")
@@ -175,7 +176,7 @@ class WebsocketServerInputTransport(BaseInputTransport):
         """
         try:
             await asyncio.sleep(session_timeout)
-            if not websocket.closed:
+            if not websocket.state == websockets.protocol.State.CLOSED:
                 await self._callbacks.on_session_timeout(websocket)
         except asyncio.CancelledError:
             logger.info(f"Monitoring task cancelled for: {websocket.remote_address}")

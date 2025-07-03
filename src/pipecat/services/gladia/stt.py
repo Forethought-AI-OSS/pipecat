@@ -31,6 +31,7 @@ from pipecat.utils.tracing.service_decorators import traced_stt
 
 try:
     import websockets
+    import websockets.protocol
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error("In order to use Gladia, you need to `pip install pipecat-ai[gladia]`.")
