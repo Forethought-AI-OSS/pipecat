@@ -146,7 +146,7 @@ def build_elevenlabs_voice_settings(
     return voice_settings or None
 
 
-def calculate_word_times_patched(
+def calculate_word_times(
     alignment_info: Mapping[str, Any], cumulative_time: float
 ) -> List[Tuple[str, float]]:
     """
