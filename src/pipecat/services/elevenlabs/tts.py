@@ -7,6 +7,7 @@
 import asyncio
 import base64
 import json
+import re
 import uuid
 from typing import Any, AsyncGenerator, Dict, List, Literal, Mapping, Optional, Tuple, Union
 
@@ -150,7 +151,7 @@ def calculate_word_times(
 ) -> List[Tuple[str, float]]:
     zipped_times = list(zip(alignment_info["chars"], alignment_info["charStartTimesMs"]))
 
-    words = "".join(alignment_info["chars"]).split(" ")
+    words = re.findall(r'\S+ ?', "".join(alignment_info["chars"]))
 
     # Calculate start time for each word. We do this by finding a space character
     # and using the previous word time, also taking into account there might not
