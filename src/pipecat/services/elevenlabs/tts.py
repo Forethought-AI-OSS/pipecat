@@ -146,21 +146,41 @@ def build_elevenlabs_voice_settings(
     return voice_settings or None
 
 
-def calculate_word_times(
+def calculate_word_times_patched(
     alignment_info: Mapping[str, Any], cumulative_time: float
 ) -> List[Tuple[str, float]]:
-    zipped_times = list(zip(alignment_info["chars"], alignment_info["charStartTimesMs"]))
+    """
+    Patched version of pipecat.services.elevenlabs.tts import ElevenLabsTTSService, calculate_word_time
+    Reason:
+    - as elevenlabs does not return always complete words, the fact that this processor acts as it was complete words,
+    space will be added always between this words.
 
-    words = re.findall(r'\S+ ?', "".join(alignment_info["chars"]))
-
-    # Calculate start time for each word. We do this by finding a space character
-    # and using the previous word time, also taking into account there might not
-    # be a space at the end.
+    Solution:
+    we prefer to no expect complete words, and keep the space from the alignement chars
+    """
+    zipped_times = list(
+        zip(alignment_info["chars"], alignment_info["charStartTimesMs"])
+    )
+    words = []
     times = []
+    current_word = ""
     for i, (a, b) in enumerate(zipped_times):
         if a == " " or i == len(zipped_times) - 1:
-            t = cumulative_time + (zipped_times[i - 1][1] / 1000.0)
-            times.append(t)
+            # Create a new word if we reach a space or end of zipped_times list.
+            # Note: it is also probably that the end of the chunk is not the end of a word!
+            current_word += a
+            if current_word.strip() != "":
+                # Only add non-empty words
+                t = cumulative_time + (zipped_times[i][1] / 1000.0)
+                times.append(t)
+                words.append(current_word)
+            current_word = ""
+        else:
+            current_word += a
+
+    if alignment_info["chars"][0] == " ":
+        # If first character is space, we add it
+        words[0] = " " + words[0]
 
     word_times = list(zip(words, times))
 
