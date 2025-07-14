@@ -138,7 +138,7 @@ class LmntTTSService(InterruptibleTTSService):
     async def _connect_websocket(self):
         """Connect to LMNT websocket."""
         try:
-            if self._websocket and self._websocket.open:
+            if self._websocket and self._websocket.state == websockets.protocol.State.OPEN:
                 return
 
             logger.debug("Connecting to LMNT")

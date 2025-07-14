@@ -193,7 +193,7 @@ class RimeTTSService(AudioContextWordTTSService):
     async def _connect_websocket(self):
         """Connect to Rime websocket API with configured settings."""
         try:
-            if self._websocket and self._websocket.open:
+            if self._websocket and self._websocket.state == websockets.protocol.State.OPEN:
                 return
 
             params = "&".join(f"{k}={v}" for k, v in self._settings.items())

@@ -219,7 +219,7 @@ class CartesiaSTTService(STTService):
                 logger.exception(f"Unexpected exception while cancelling task: {e}")
             self._receiver_task = None
 
-        if self._connection and self._connection.open:
+        if self._connection and self._connection.state == websockets.protocol.State.OPEN:
             logger.debug("Disconnecting from Cartesia")
 
             await self._connection.close()
@@ -236,5 +236,5 @@ class CartesiaSTTService(STTService):
             await self.start_metrics()
         elif isinstance(frame, UserStoppedSpeakingFrame):
             # Send finalize command to flush the transcription session
-            if self._connection and self._connection.open:
+            if self._connection and self._connection.state == websockets.protocol.State.OPEN:
                 await self._connection.send("finalize")

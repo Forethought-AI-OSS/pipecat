@@ -186,7 +186,7 @@ class NeuphonicTTSService(InterruptibleTTSService):
 
     async def _connect_websocket(self):
         try:
-            if self._websocket and self._websocket.open:
+            if self._websocket and self._websocket.state == websockets.protocol.State.OPEN:
                 return
 
             logger.debug("Connecting to Neuphonic")

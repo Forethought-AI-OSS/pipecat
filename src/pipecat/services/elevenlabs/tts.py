@@ -316,7 +316,7 @@ class ElevenLabsTTSService(AudioContextWordTTSService):
 
     async def _connect_websocket(self):
         try:
-            if self._websocket and self._websocket.open:
+            if self._websocket and self._websocket.state == websockets.protocol.State.OPEN:
                 return
 
             logger.debug("Connecting to ElevenLabs")
@@ -434,7 +434,7 @@ class ElevenLabsTTSService(AudioContextWordTTSService):
             self.reset_watchdog()
             await asyncio.sleep(KEEPALIVE_SLEEP)
             try:
-                if self._websocket and self._websocket.open:
+                if self._websocket and self._websocket.state == websockets.protocol.State.OPEN:
                     if self._context_id:
                         # Send keepalive with context ID to keep the connection alive
                         keepalive_message = {
