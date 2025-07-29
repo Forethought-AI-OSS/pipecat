@@ -83,11 +83,7 @@ class WebsocketService(ABC):
                 await self._receive_messages()
                 retry_count = 0  # Reset counter on successful message receive
                 if self._websocket and self._websocket.state is State.CLOSED:
-                    raise websockets.ConnectionClosedOK(
-                        self._websocket.close_rcvd,
-                        self._websocket.close_sent,
-                        self._websocket.close_rcvd_then_sent,
-                    )
+                    raise self._websocket.close_exc
             except Exception as e:
                 message = f"{self} error receiving messages: {e}"
                 logger.error(message)
