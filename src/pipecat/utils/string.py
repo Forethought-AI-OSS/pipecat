@@ -23,11 +23,6 @@ from typing import FrozenSet, Optional, Sequence, Tuple
 import nltk
 from nltk.tokenize import sent_tokenize
 
-# Ensure punkt_tab tokenizer data is available
-try:
-    nltk.data.find("tokenizers/punkt_tab")
-except LookupError:
-    nltk.download("punkt_tab", quiet=True)
 
 SENTENCE_ENDING_PUNCTUATION: FrozenSet[str] = frozenset(
     {
