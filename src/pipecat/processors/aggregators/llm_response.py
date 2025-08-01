@@ -926,6 +926,12 @@ class LLMAssistantContextAggregator(LLMContextResponseAggregator):
                 run_llm = not bool(self._function_calls_in_progress)
 
         if run_llm:
+            while self._started > 0:
+                # If we are still processing LLM responses, wait for them to finish.
+                logger.debug(
+                    f"{self} Waiting for {self._started} LLM responses to finish before running inference."
+                )
+                await asyncio.sleep(0.1)
             await self.push_context_frame(FrameDirection.UPSTREAM)
 
         # Call the `on_context_updated` callback once the function call result
