@@ -292,9 +292,6 @@ class BaseOpenAILLMService(LLMService):
                     # Keep iterating through the response to collect all the argument fragments
                     arguments += tool_call.function.arguments
             elif chunk.choices[0].delta.content:
-                # Do not yield text frames if we already know that this is a function call
-                if functions_list or arguments_list or tool_id_list or function_name or arguments:
-                    continue
                 await self.push_frame(LLMTextFrame(chunk.choices[0].delta.content))
 
             # When gpt-4o-audio / gpt-4o-mini-audio is used for llm or stt+llm

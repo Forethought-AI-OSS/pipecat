@@ -135,10 +135,6 @@ class OpenAIAssistantContextAggregator(LLMAssistantContextAggregator):
         Args:
             frame: Frame containing function call progress information.
         """
-        if frame.function_name == "search_help_center_articles":
-            while self._context.messages[-1]["role"] != "assistant":
-                # Wait for the assistant message to be added before proceeding
-                await asyncio.sleep(0.01)
         self._context.add_message(
             {
                 "role": "assistant",
