@@ -13,6 +13,7 @@ real-time communication features.
 
 import asyncio
 import time
+from concurrent.futures import CancelledError as FuturesCancelledError
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional
@@ -559,7 +560,7 @@ class DailyTransportClient(EventHandler):
         self._out_sample_rate = self._params.audio_out_sample_rate or frame.audio_out_sample_rate
 
         if self._params.audio_in_enabled:
-            if self._params.audio_in_user_tracks and not self._audio_task:
+            if self._params.audio_in_user_tracks and not self._audio_task and self._task_manager:
                 self._audio_queue = WatchdogQueue(self._task_manager)
                 self._audio_task = self._task_manager.create_task(
                     self._callback_task_handler(self._audio_queue),
@@ -1320,10 +1321,13 @@ class DailyTransportClient(EventHandler):
 
     def _call_async_callback(self, queue: asyncio.Queue, callback, *args):
         """Queue a callback for async execution on the event loop."""
-        future = asyncio.run_coroutine_threadsafe(
-            queue.put((callback, *args)), self._get_event_loop()
-        )
-        future.result()
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                queue.put((callback, *args)), self._get_event_loop()
+            )
+            future.result()
+        except FuturesCancelledError:
+            pass
 
     async def _callback_task_handler(self, queue: asyncio.Queue):
         """Handle queued callbacks from the specified queue."""
