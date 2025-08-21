@@ -139,7 +139,7 @@ class OpenAIAssistantContextAggregator(LLMAssistantContextAggregator):
         if (
             self._context.messages
             and self._context.messages[-1]["role"] == "system"
-            and self._context.messages[-1]["message"].startswith(
+            and self._context.messages[-1]["content"].startswith(
                 "Give a brief, natural acknowledgment that you're helping them."
             )
         ):
