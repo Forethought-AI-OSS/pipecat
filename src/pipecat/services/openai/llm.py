@@ -5,6 +5,7 @@
 #
 
 """OpenAI LLM service implementation with context aggregators."""
+
 import asyncio
 import json
 from dataclasses import dataclass
@@ -135,7 +136,13 @@ class OpenAIAssistantContextAggregator(LLMAssistantContextAggregator):
         Args:
             frame: Frame containing function call progress information.
         """
-        if frame.function_name == "search_help_center_articles":
+        if (
+            self._context.messages
+            and self._context.messages[-1]["role"] == "system"
+            and self._context.messages[-1]["message"].startswith(
+                "Give a brief, natural acknowledgment that you're helping them."
+            )
+        ):
             while self._context.messages[-1]["role"] != "assistant":
                 # Wait for the assistant message to be added before proceeding
                 await asyncio.sleep(0.01)
