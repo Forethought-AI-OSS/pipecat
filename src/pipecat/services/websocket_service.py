@@ -12,6 +12,7 @@ from typing import Awaitable, Callable, Optional
 
 import websockets
 from loguru import logger
+from websockets.exceptions import ConnectionClosedOK
 from websockets.protocol import State
 
 from pipecat.frames.frames import ErrorFrame
@@ -82,8 +83,10 @@ class WebsocketService(ABC):
             try:
                 await self._receive_messages()
                 retry_count = 0  # Reset counter on successful message receive
-                if self._websocket and self._websocket.state is State.CLOSED:
-                    raise self._websocket.close_exc
+            except ConnectionClosedOK as e:
+                # Normal closure, don't retry
+                logger.debug(f"{self} connection closed normally: {e}")
+                break
             except Exception as e:
                 message = f"{self} error receiving messages: {e}"
                 logger.error(message)

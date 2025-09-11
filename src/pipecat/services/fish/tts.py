@@ -21,8 +21,8 @@ from pipecat.frames.frames import (
     EndFrame,
     ErrorFrame,
     Frame,
+    InterruptionFrame,
     StartFrame,
-    StartInterruptionFrame,
     TTSAudioRawFrame,
     TTSStartedFrame,
     TTSStoppedFrame,
@@ -120,12 +120,14 @@ class FishAudioTTSService(InterruptibleTTSService):
         if model:
             import warnings
 
-            warnings.warn(
-                "Parameter 'model' is deprecated and will be removed in a future version. "
-                "Use 'reference_id' instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("always")
+                warnings.warn(
+                    "Parameter 'model' is deprecated and will be removed in a future version. "
+                    "Use 'reference_id' instead.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
             reference_id = model
 
         self._api_key = api_key
@@ -257,7 +259,7 @@ class FishAudioTTSService(InterruptibleTTSService):
             return self._websocket
         raise Exception("Websocket not connected")
 
-    async def _handle_interruption(self, frame: StartInterruptionFrame, direction: FrameDirection):
+    async def _handle_interruption(self, frame: InterruptionFrame, direction: FrameDirection):
         await super()._handle_interruption(frame, direction)
         await self.stop_all_metrics()
         self._request_id = None

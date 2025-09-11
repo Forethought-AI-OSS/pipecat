@@ -17,11 +17,11 @@ from pipecat.frames.frames import (
     FunctionCallResultFrame,
     FunctionCallResultProperties,
     InterimTranscriptionFrame,
+    InterruptionFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     OpenAILLMContextAssistantTimestampFrame,
     SpeechControlParamsFrame,
-    StartInterruptionFrame,
     TextFrame,
     TranscriptionFrame,
     UserStartedSpeakingFrame,
@@ -102,8 +102,8 @@ class BaseTestUserContextAggregator:
         ]
         expected_down_frames = [
             UserStartedSpeakingFrame,
-            UserStoppedSpeakingFrame,
             *self.EXPECTED_CONTEXT_FRAMES,
+            UserStoppedSpeakingFrame,
         ]
         await run_test(
             aggregator,
@@ -127,8 +127,8 @@ class BaseTestUserContextAggregator:
         ]
         expected_down_frames = [
             UserStartedSpeakingFrame,
-            UserStoppedSpeakingFrame,
             *self.EXPECTED_CONTEXT_FRAMES,
+            UserStoppedSpeakingFrame,
         ]
         await run_test(
             aggregator,
@@ -158,8 +158,8 @@ class BaseTestUserContextAggregator:
             UserStartedSpeakingFrame,
             UserStoppedSpeakingFrame,
             UserStartedSpeakingFrame,
-            UserStoppedSpeakingFrame,
             *self.EXPECTED_CONTEXT_FRAMES,
+            UserStoppedSpeakingFrame,
         ]
         await run_test(
             aggregator,
@@ -298,8 +298,8 @@ class BaseTestUserContextAggregator:
         expected_down_frames = [
             SpeechControlParamsFrame,
             UserStartedSpeakingFrame,
-            UserStoppedSpeakingFrame,
             *self.EXPECTED_CONTEXT_FRAMES,
+            UserStoppedSpeakingFrame,
             *self.EXPECTED_CONTEXT_FRAMES,
         ]
         await run_test(
@@ -618,7 +618,7 @@ class BaseTestAssistantContextAggreagator:
             TextFrame(text="Pipecat."),
             LLMFullResponseEndFrame(),
             SleepFrame(AGGREGATION_SLEEP),
-            StartInterruptionFrame(),
+            InterruptionFrame(),
             LLMFullResponseStartFrame(),
             TextFrame(text="How are "),
             TextFrame(text="you?"),
@@ -626,7 +626,7 @@ class BaseTestAssistantContextAggreagator:
         ]
         expected_down_frames = [
             *self.EXPECTED_CONTEXT_FRAMES,
-            StartInterruptionFrame,
+            InterruptionFrame,
             *self.EXPECTED_CONTEXT_FRAMES,
         ]
         await run_test(
