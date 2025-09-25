@@ -30,7 +30,6 @@ from loguru import logger
 from pydantic import BaseModel, Field, PrivateAttr, ValidationError
 
 from pipecat.frames.frames import (
-    BotInterruptionFrame,
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     CancelFrame,
@@ -42,6 +41,8 @@ from pipecat.frames.frames import (
     FunctionCallResultFrame,
     InputAudioRawFrame,
     InterimTranscriptionFrame,
+    LLMConfigureOutputFrame,
+    LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMMessagesAppendFrame,
@@ -72,11 +73,9 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.services.llm_service import (
     FunctionCallParams,  # TODO(aleix): we shouldn't import `services` from `processors`
 )
-from pipecat.services.openai.llm import OpenAIContextAggregatorPair
 from pipecat.transports.base_input import BaseInputTransport
 from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import BaseTransport
-from pipecat.utils.asyncio.watchdog_queue import WatchdogQueue
 from pipecat.utils.string import match_endofsentence
 
 RTVI_PROTOCOL_VERSION = "1.0.0"
@@ -588,10 +587,35 @@ class RTVILLMFunctionCallMessage(BaseModel):
     data: RTVILLMFunctionCallMessageData
 
 
+class RTVISendTextOptions(BaseModel):
+    """Options for sending text input to the LLM.
+
+    Contains options for how the pipeline should process the text input.
+    """
+
+    run_immediately: bool = True
+    audio_response: bool = True
+
+
+class RTVISendTextData(BaseModel):
+    """Data format for sending text input to the LLM.
+
+    Contains the text content to send and any options for how the pipeline should process it.
+
+    """
+
+    content: str
+    options: Optional[RTVISendTextOptions] = None
+
+
 class RTVIAppendToContextData(BaseModel):
     """Data format for appending messages to the context.
 
     Contains the role, content, and whether to run the message immediately.
+
+        .. deprecated:: 0.0.85
+            The RTVI message, append-to-context, has been deprecated. Use send-text
+            or custom client and server messages instead.
     """
 
     role: Literal["user", "assistant"] | str
@@ -918,7 +942,10 @@ class RTVIObserver(BaseObserver):
             and self._params.user_transcription_enabled
         ):
             await self._handle_user_transcriptions(frame)
-        elif isinstance(frame, OpenAILLMContextFrame) and self._params.user_llm_enabled:
+        elif (
+            isinstance(frame, (OpenAILLMContextFrame, LLMContextFrame))
+            and self._params.user_llm_enabled
+        ):
             await self._handle_context(frame)
         elif isinstance(frame, LLMFullResponseStartFrame) and self._params.bot_llm_enabled:
             await self.push_transport_message_urgent(RTVIBotLLMStartedMessage())
@@ -1019,16 +1046,20 @@ class RTVIObserver(BaseObserver):
         if message:
             await self.push_transport_message_urgent(message)
 
-    async def _handle_context(self, frame: OpenAILLMContextFrame):
+    async def _handle_context(self, frame: OpenAILLMContextFrame | LLMContextFrame):
         """Process LLM context frames to extract user messages for the RTVI client."""
         try:
-            messages = frame.context.messages
+            if isinstance(frame, OpenAILLMContextFrame):
+                messages = frame.context.messages
+            else:
+                messages = frame.context.get_messages()
             if not messages:
                 return
 
             message = messages[-1]
 
             # Handle Google LLM format (protobuf objects with attributes)
+            # Note: not possible if frame is a universal LLMContextFrame
             if hasattr(message, "role") and message.role == "user" and hasattr(message, "parts"):
                 text = "".join(part.text for part in message.parts if hasattr(part, "text"))
                 if text:
@@ -1118,8 +1149,11 @@ class RTVIProcessor(FrameProcessor):
         self._bot_ready = False
         self._client_ready = False
         self._client_ready_id = ""
-        self._client_version = []
+        # Default to 0.3.0 which is the last version before actually having a
+        # "client-version".
+        self._client_version = [0, 3, 0]
         self._errors_enabled = True
+        self._skip_tts: bool = False  # Keep in sync with llm_service.py
 
         self._registered_actions: Dict[str, RTVIAction] = {}
         self._registered_services: Dict[str, RTVIService] = {}
@@ -1198,7 +1232,7 @@ class RTVIProcessor(FrameProcessor):
 
     async def interrupt_bot(self):
         """Send a bot interruption frame upstream."""
-        await self.push_frame(BotInterruptionFrame(), FrameDirection.UPSTREAM)
+        await self.push_interruption_task_frame_and_wait()
 
     async def send_server_message(self, data: Any):
         """Send a server message to the client."""
@@ -1308,6 +1342,9 @@ class RTVIProcessor(FrameProcessor):
         # Data frames
         elif isinstance(frame, RTVIActionFrame):
             await self._action_queue.put(frame)
+        elif isinstance(frame, LLMConfigureOutputFrame):
+            self._skip_tts = frame.skip_tts
+            await self.push_frame(frame, direction)
         # Other frames
         else:
             await self.push_frame(frame, direction)
@@ -1315,10 +1352,10 @@ class RTVIProcessor(FrameProcessor):
     async def _start(self, frame: StartFrame):
         """Start the RTVI processor tasks."""
         if not self._action_task:
-            self._action_queue = WatchdogQueue(self.task_manager)
+            self._action_queue = asyncio.Queue()
             self._action_task = self.create_task(self._action_task_handler())
         if not self._message_task:
-            self._message_queue = WatchdogQueue(self.task_manager)
+            self._message_queue = asyncio.Queue()
             self._message_task = self.create_task(self._message_task_handler())
         await self._call_event_handler("on_bot_started")
 
@@ -1333,12 +1370,10 @@ class RTVIProcessor(FrameProcessor):
     async def _cancel_tasks(self):
         """Cancel all running tasks."""
         if self._action_task:
-            self._action_queue.cancel()
             await self.cancel_task(self._action_task)
             self._action_task = None
 
         if self._message_task:
-            self._message_queue.cancel()
             await self.cancel_task(self._message_task)
             self._message_task = None
 
@@ -1409,7 +1444,13 @@ class RTVIProcessor(FrameProcessor):
                 case "llm-function-call-result":
                     data = RTVILLMFunctionCallResultData.model_validate(message.data)
                     await self._handle_function_call_result(data)
+                case "send-text":
+                    data = RTVISendTextData.model_validate(message.data)
+                    await self._handle_send_text(data)
                 case "append-to-context":
+                    logger.warning(
+                        f"The append-to-context message is deprecated, use send-text instead."
+                    )
                     data = RTVIAppendToContextData.model_validate(message.data)
                     await self._handle_update_context(data)
                 case "raw-audio" | "raw-audio-batch":
@@ -1427,16 +1468,13 @@ class RTVIProcessor(FrameProcessor):
 
     async def _handle_client_ready(self, request_id: str, data: RTVIClientReadyData | None):
         """Handle the client-ready message from the client."""
-        version = data.version if data else "unknown"
+        version = data.version if data else None
         logger.debug(f"Received client-ready: version {version}")
-        if version == "unknown":
-            self._client_version = [0, 3, 0]  # Default to 0.3.0 if unknown
-        else:
+        if version:
             try:
                 self._client_version = [int(v) for v in version.split(".")]
             except ValueError:
                 logger.warning(f"Invalid client version format: {version}")
-                self._client_version = [0, 3, 0]
         about = data.about if data else {"library": "unknown"}
         logger.debug(f"Client Details: {about}")
         if self._input_transport:
@@ -1561,6 +1599,26 @@ class RTVIProcessor(FrameProcessor):
         await self._update_config(RTVIConfig(config=data.config), data.interrupt)
         await self._handle_get_config(request_id)
 
+    async def _handle_send_text(self, data: RTVISendTextData):
+        """Handle a send-text message from the client."""
+        opts = data.options if data.options is not None else RTVISendTextOptions()
+        if opts.run_immediately:
+            await self.interrupt_bot()
+        cur_skip_tts = self._skip_tts
+        should_skip_tts = not opts.audio_response
+        toggle_skip_tts = cur_skip_tts != should_skip_tts
+        if toggle_skip_tts:
+            output_frame = LLMConfigureOutputFrame(skip_tts=should_skip_tts)
+            await self.push_frame(output_frame)
+        text_frame = LLMMessagesAppendFrame(
+            messages=[{"role": "user", "content": data.content}],
+            run_llm=opts.run_immediately,
+        )
+        await self.push_frame(text_frame)
+        if toggle_skip_tts:
+            output_frame = LLMConfigureOutputFrame(skip_tts=cur_skip_tts)
+            await self.push_frame(output_frame)
+
     async def _handle_update_context(self, data: RTVIAppendToContextData):
         if data.run_immediately:
             await self.interrupt_bot()
@@ -1619,7 +1677,7 @@ class RTVIProcessor(FrameProcessor):
     async def _send_bot_ready(self):
         """Send the bot-ready message to the client."""
         config = None
-        if self._client_version[0] < 1:
+        if self._client_version and self._client_version[0] < 1:
             config = self._config.config
         message = RTVIBotReady(
             id=self._client_ready_id,
