@@ -8,6 +8,8 @@
 
 import asyncio
 import json
+import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -25,6 +27,8 @@ from pipecat.processors.aggregators.llm_response import (
 )
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.services.openai.base_llm import BaseOpenAILLMService
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -127,6 +131,21 @@ class OpenAIAssistantContextAggregator(LLMAssistantContextAggregator):
     tool usage tracking, and image message handling.
     """
 
+    async def _wait_for_assistant_message(
+        self,
+        timeout: float = 3.0,
+        poll_interval: float = 0.01,
+    ) -> bool:
+        start = time.monotonic()
+        while time.monotonic() - start < timeout:
+            if self._context.messages:
+                last = self._context.messages[-1]
+                if isinstance(last, dict) and last.get("role") == "assistant":
+                    return True
+            await asyncio.sleep(poll_interval)
+        logger.warning("Timed out waiting for assistant message; proceeding anyway.")
+        return False
+
     async def handle_function_call_in_progress(self, frame: FunctionCallInProgressFrame):
         """Handle a function call in progress.
 
@@ -138,14 +157,13 @@ class OpenAIAssistantContextAggregator(LLMAssistantContextAggregator):
         """
         if (
             self._context.messages
-            and self._context.messages[-1]["role"] == "system"
-            and self._context.messages[-1]["content"].startswith(
-                "Give a brief, natural acknowledgment that you're helping them."
-            )
+            and self._context.messages[-1].get("role") == "system"
+            and self._context.messages[-1]
+            .get("content", "")
+            .startswith("Give a brief, natural acknowledgment that you're helping them.")
         ):
-            while self._context.messages[-1]["role"] != "assistant":
-                # Wait for the assistant message to be added before proceeding
-                await asyncio.sleep(0.01)
+            await self._wait_for_assistant_message()
+
         self._context.add_message(
             {
                 "role": "assistant",
