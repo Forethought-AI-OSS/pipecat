@@ -9,9 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added `WebsocketSTTService` base class for websocket-based STT services.
+  Combines STT functionality with websocket connectivity, providing automatic
+  error handling and reconnection capabilities with exponential backoff.
+
+- Added `DeepgramFluxSTTService` for real-time speech recognition using
+  Deepgram's Flux WebSocket API. Flux understands conversational flow and
+  automatically handles turn-taking.
+
+- Added RTVI messages for user/bot audio levels and system logs.
+
 - Include OpenAI-based LLM services cached tokens to `MetricsFrame`.
 
+### Changed
+
+- Updated the default model for `AnthropicLLMService` to
+  `claude-sonnet-4-5-20250929`.
+
+### Deprecated
+
+- `DailyUpdateRemoteParticipantsFrame` is deprecated and will be removed in a
+  future version. Instead, create your own custom frame and handle it in the
+  `@transport.output().event_handler("on_after_push_frame")` event handler or a
+  custom processor.
+
 ## Fixed
+
+- Fixed a `PipelineTask` issue that could prevent the application to exit if
+  `task.cancel()` was called when the task was already finished.
 
 - Fixed an issue where local SmartTurn was not being ran in a separate thread.
 
