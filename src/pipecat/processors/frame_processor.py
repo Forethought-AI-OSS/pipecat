@@ -14,7 +14,7 @@ management, and frame flow control mechanisms.
 import asyncio
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Awaitable, Callable, Coroutine, List, Optional, Sequence, Tuple
+from typing import Any, Awaitable, Callable, Coroutine, List, Optional, Sequence, Tuple, Type
 
 from loguru import logger
 
@@ -83,12 +83,7 @@ class FrameProcessorQueue(asyncio.PriorityQueue):
     LOW_PRIORITY = 2
 
     def __init__(self):
-        """Initialize the FrameProcessorQueue.
-
-        Args:
-            manager (BaseTaskManager): The task manager used by the internal watchdog queues.
-
-        """
+        """Initialize the FrameProcessorQueue."""
         super().__init__()
         self.__high_counter = 0
         self.__low_counter = 0
@@ -689,6 +684,19 @@ class FrameProcessor(BaseObject):
 
         self._wait_for_interruption = False
 
+    async def broadcast_frame(self, frame_cls: Type[Frame], **kwargs):
+        """Broadcasts a frame of the specified class upstream and downstream.
+
+        This method creates two instances of the given frame class using the
+        provided keyword arguments and pushes them upstream and downstream.
+
+        Args:
+            frame_cls: The class of the frame to be broadcasted.
+            **kwargs: Keyword arguments to be passed to the frame's constructor.
+        """
+        await self.push_frame(frame_cls(**kwargs))
+        await self.push_frame(frame_cls(**kwargs), FrameDirection.UPSTREAM)
+
     async def __start(self, frame: StartFrame):
         """Handle the start frame to initialize processor state.
 
@@ -877,14 +885,14 @@ class FrameProcessor(BaseObject):
 
         """
         while True:
+            (frame, direction, callback) = await self.__input_queue.get()
+
             if self.__should_block_system_frames and self.__input_event:
                 logger.trace(f"{self}: system frame processing paused")
                 await self.__input_event.wait()
                 self.__input_event.clear()
                 self.__should_block_system_frames = False
                 logger.trace(f"{self}: system frame processing resumed")
-
-            (frame, direction, callback) = await self.__input_queue.get()
 
             if isinstance(frame, SystemFrame):
                 await self.__process_frame(frame, direction, callback)
@@ -900,14 +908,14 @@ class FrameProcessor(BaseObject):
     async def __process_frame_task_handler(self):
         """Handle non-system frames from the process queue."""
         while True:
+            (frame, direction, callback) = await self.__process_queue.get()
+
             if self.__should_block_frames and self.__process_event:
                 logger.trace(f"{self}: frame processing paused")
                 await self.__process_event.wait()
                 self.__process_event.clear()
                 self.__should_block_frames = False
                 logger.trace(f"{self}: frame processing resumed")
-
-            (frame, direction, callback) = await self.__process_queue.get()
 
             await self.__process_frame(frame, direction, callback)
 

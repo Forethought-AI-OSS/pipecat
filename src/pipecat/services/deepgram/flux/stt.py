@@ -79,7 +79,7 @@ class DeepgramFluxSTTService(WebsocketSTTService):
         This class defines all available connection parameters for the Deepgram Flux API
         based on the official documentation.
 
-        Attributes:
+        Parameters:
             eager_eot_threshold: Optional. EagerEndOfTurn/TurnResumed are off by default.
                 You can turn them on by setting eager_eot_threshold to a valid value.
                 Lower values = more aggressive EagerEndOfTurning (faster response, more LLM calls).
@@ -126,24 +126,24 @@ class DeepgramFluxSTTService(WebsocketSTTService):
                 If None, default parameters will be used.
             **kwargs: Additional arguments passed to the parent WebsocketSTTService class.
 
-        Example:
-            ```python
-            # Basic usage with default parameters
-            stt = DeepgramFluxSTTService(api_key="your-api-key")
+        Examples:
+            Basic usage with default parameters::
 
-            # Advanced usage with custom parameters
-            params = DeepgramFluxSTTService.InputParams(
-                eager_eot_threshold=0.5,
-                eot_threshold=0.8,
-                keyterm=["AI", "machine learning", "neural network"],
-                tag=["production", "voice-agent"]
-            )
-            stt = DeepgramFluxSTTService(
-                api_key="your-api-key",
-                model="flux-general-en",
-                params=params
-            )
-            ```
+                stt = DeepgramFluxSTTService(api_key="your-api-key")
+
+            Advanced usage with custom parameters::
+
+                params = DeepgramFluxSTTService.InputParams(
+                    eager_eot_threshold=0.5,
+                    eot_threshold=0.8,
+                    keyterm=["AI", "machine learning", "neural network"],
+                    tag=["production", "voice-agent"]
+                )
+                stt = DeepgramFluxSTTService(
+                    api_key="your-api-key",
+                    model="flux-general-en",
+                    params=params
+                )
         """
         super().__init__(sample_rate=sample_rate, **kwargs)
 
@@ -156,6 +156,12 @@ class DeepgramFluxSTTService(WebsocketSTTService):
         self._language = Language.EN
         self._websocket_url = None
         self._receive_task = None
+        # Flux event handlers
+        self._register_event_handler("on_start_of_turn")
+        self._register_event_handler("on_turn_resumed")
+        self._register_event_handler("on_end_of_turn")
+        self._register_event_handler("on_eager_end_of_turn")
+        self._register_event_handler("on_update")
 
     async def _connect(self):
         """Connect to WebSocket and start background tasks.
@@ -205,6 +211,7 @@ class DeepgramFluxSTTService(WebsocketSTTService):
                 additional_headers={"Authorization": f"Token {self._api_key}"},
             )
             logger.debug("Connected to Deepgram Flux Websocket")
+            await self._call_event_handler("on_connected")
         except Exception as e:
             logger.error(f"{self} initialization error: {e}")
             self._websocket = None
@@ -225,6 +232,9 @@ class DeepgramFluxSTTService(WebsocketSTTService):
                 await self._websocket.close()
         except Exception as e:
             logger.error(f"{self} error closing websocket: {e}")
+        finally:
+            self._websocket = None
+            await self._call_event_handler("on_disconnected")
 
     async def _send_close_stream(self) -> None:
         """Sends a CloseStream control message to the Deepgram Flux WebSocket API.
@@ -516,9 +526,9 @@ class DeepgramFluxSTTService(WebsocketSTTService):
         """
         logger.debug("User started speaking")
         await self.push_interruption_task_frame_and_wait()
-        await self.push_frame(UserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
-        await self.push_frame(UserStartedSpeakingFrame(), FrameDirection.UPSTREAM)
+        await self.broadcast_frame(UserStartedSpeakingFrame)
         await self.start_metrics()
+        await self._call_event_handler("on_start_of_turn", transcript)
         if transcript:
             logger.trace(f"Start of turn transcript: {transcript}")
 
@@ -533,6 +543,7 @@ class DeepgramFluxSTTService(WebsocketSTTService):
             event: The event type string for logging purposes.
         """
         logger.trace(f"Received event TurnResumed: {event}")
+        await self._call_event_handler("on_turn_resumed")
 
     async def _handle_end_of_turn(self, transcript: str, data: Dict[str, Any]):
         """Handle EndOfTurn events from Deepgram Flux.
@@ -567,6 +578,7 @@ class DeepgramFluxSTTService(WebsocketSTTService):
         await self.stop_processing_metrics()
         await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
         await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.UPSTREAM)
+        await self._call_event_handler("on_end_of_turn", transcript)
 
     async def _handle_eager_end_of_turn(self, transcript: str, data: Dict[str, Any]):
         """Handle EagerEndOfTurn events from Deepgram Flux.
@@ -611,6 +623,7 @@ class DeepgramFluxSTTService(WebsocketSTTService):
                 result=data,
             )
         )
+        await self._call_event_handler("on_eager_end_of_turn", transcript)
 
     async def _handle_update(self, transcript: str):
         """Handle Update events from Deepgram Flux.
@@ -634,3 +647,4 @@ class DeepgramFluxSTTService(WebsocketSTTService):
             # both the "user started speaking" event and the first transcript simultaneously,
             # making this timing measurement meaningless in this context.
             # await self.stop_ttfb_metrics()
+            await self._call_event_handler("on_update", transcript)

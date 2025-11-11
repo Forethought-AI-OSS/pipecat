@@ -232,6 +232,9 @@ class BaseInputTransport(FrameProcessor):
         """
         # Cancel and wait for the audio input task to finish.
         await self._cancel_audio_task()
+        # Stop audio filter.
+        if self._params.audio_in_filter:
+            await self._params.audio_in_filter.stop()
 
     async def set_transport_ready(self, frame: StartFrame):
         """Called when the transport is ready to stream.
@@ -332,10 +335,7 @@ class BaseInputTransport(FrameProcessor):
             logger.debug("User started speaking")
             self._user_speaking = True
 
-            upstream_frame = UserStartedSpeakingFrame(emulated=emulated)
-            downstream_frame = UserStartedSpeakingFrame(emulated=emulated)
-            await self.push_frame(downstream_frame)
-            await self.push_frame(upstream_frame, FrameDirection.UPSTREAM)
+            await self.broadcast_frame(UserStartedSpeakingFrame, emulated=emulated)
 
             # Only push InterruptionFrame if:
             # 1. No interruption config is set, OR
@@ -356,10 +356,7 @@ class BaseInputTransport(FrameProcessor):
             logger.debug("User stopped speaking")
             self._user_speaking = False
 
-            upstream_frame = UserStoppedSpeakingFrame(emulated=emulated)
-            downstream_frame = UserStoppedSpeakingFrame(emulated=emulated)
-            await self.push_frame(downstream_frame)
-            await self.push_frame(upstream_frame, FrameDirection.UPSTREAM)
+            await self.broadcast_frame(UserStoppedSpeakingFrame, emulated=emulated)
 
     #
     # Handle bot speaking state
@@ -476,8 +473,7 @@ class BaseInputTransport(FrameProcessor):
                     await self._run_turn_analyzer(frame, vad_state, previous_vad_state)
 
                 if vad_state == VADState.SPEAKING:
-                    await self.push_frame(UserSpeakingFrame())
-                    await self.push_frame(UserSpeakingFrame(), FrameDirection.UPSTREAM)
+                    await self.broadcast_frame(UserSpeakingFrame)
 
                 # Push audio downstream if passthrough is set.
                 if self._params.audio_in_passthrough:

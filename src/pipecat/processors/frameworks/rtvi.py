@@ -42,6 +42,7 @@ from pipecat.frames.frames import (
     Frame,
     FunctionCallResultFrame,
     InputAudioRawFrame,
+    InputTransportMessageFrame,
     InterimTranscriptionFrame,
     LLMConfigureOutputFrame,
     LLMContextFrame,
@@ -50,10 +51,10 @@ from pipecat.frames.frames import (
     LLMMessagesAppendFrame,
     LLMTextFrame,
     MetricsFrame,
+    OutputTransportMessageUrgentFrame,
     StartFrame,
     SystemFrame,
     TranscriptionFrame,
-    TransportMessageUrgentFrame,
     TTSAudioRawFrame,
     TTSStartedFrame,
     TTSStoppedFrame,
@@ -919,7 +920,7 @@ class RTVIObserverParams:
     user_audio_level_enabled: bool = False
     metrics_enabled: bool = True
     system_logs_enabled: bool = False
-    errors_enabled: bool = True
+    errors_enabled: Optional[bool] = None
     audio_level_period_secs: float = 0.15
 
 
@@ -962,7 +963,7 @@ class RTVIObserver(BaseObserver):
         if self._params.system_logs_enabled:
             self._system_logger_id = logger.add(self._logger_sink)
 
-        if self._params.errors_enabled:
+        if self._params.errors_enabled is not None:
             import warnings
 
             with warnings.catch_warnings():
@@ -1017,6 +1018,7 @@ class RTVIObserver(BaseObserver):
 
         if (
             isinstance(frame, (UserStartedSpeakingFrame, UserStoppedSpeakingFrame))
+            and (direction == FrameDirection.DOWNSTREAM)
             and self._params.user_speaking_enabled
         ):
             await self._handle_interruptions(frame)
@@ -1209,11 +1211,10 @@ class RTVIObserver(BaseObserver):
 
     async def _send_error_response(self, frame: RTVIServerResponseFrame):
         """Send a response to the client for a specific request."""
-        if self._params.errors_enabled:
-            message = RTVIErrorResponse(
-                id=str(frame.client_msg.msg_id), data=RTVIErrorResponseData(error=frame.error)
-            )
-            await self.send_rtvi_message(message)
+        message = RTVIErrorResponse(
+            id=str(frame.client_msg.msg_id), data=RTVIErrorResponseData(error=frame.error)
+        )
+        await self.send_rtvi_message(message)
 
 
 class RTVIProcessor(FrameProcessor):
@@ -1313,7 +1314,11 @@ class RTVIProcessor(FrameProcessor):
     async def set_bot_ready(self):
         """Mark the bot as ready and send the bot-ready message."""
         self._bot_ready = True
-        await self._update_config(self._config, False)
+        # Only call the (deprecated) _update_config method if the we're using a
+        # config (which is deprecated). Otherwise we'd always print an
+        # unnecessary deprecation warning.
+        if self._config.config:
+            await self._update_config(self._config, False)
         await self._send_bot_ready()
 
     async def interrupt_bot(self):
@@ -1346,7 +1351,9 @@ class RTVIProcessor(FrameProcessor):
 
     async def push_transport_message(self, model: BaseModel, exclude_none: bool = True):
         """Push a transport message frame."""
-        frame = TransportMessageUrgentFrame(message=model.model_dump(exclude_none=exclude_none))
+        frame = OutputTransportMessageUrgentFrame(
+            message=model.model_dump(exclude_none=exclude_none)
+        )
         await self.push_frame(frame)
 
     async def handle_message(self, message: RTVIMessage):
@@ -1419,7 +1426,7 @@ class RTVIProcessor(FrameProcessor):
         elif isinstance(frame, ErrorFrame):
             await self._send_error_frame(frame)
             await self.push_frame(frame, direction)
-        elif isinstance(frame, TransportMessageUrgentFrame):
+        elif isinstance(frame, InputTransportMessageFrame):
             await self._handle_transport_message(frame)
         # All other system frames
         elif isinstance(frame, SystemFrame):
@@ -1482,7 +1489,7 @@ class RTVIProcessor(FrameProcessor):
             await self._handle_message(message)
             self._message_queue.task_done()
 
-    async def _handle_transport_message(self, frame: TransportMessageUrgentFrame):
+    async def _handle_transport_message(self, frame: InputTransportMessageFrame):
         """Handle an incoming transport message frame."""
         try:
             transport_message = frame.message
