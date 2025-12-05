@@ -33,7 +33,7 @@ dependencies = [
     "pyloudnorm~=0.1.1",
     "resampy~=0.4.3",
     "soxr~=0.5.0",
-    "openai~=1.70.0",
+    "openai~=1.91.0",
     # Pinning numba to resolve package dependencies
     "numba==0.61.2",
     "wait_for2>=0.4.1; python_version<'3.12'",
@@ -82,7 +82,7 @@ nim = []
 neuphonic = [ "pipecat-ai[websockets-base]" ]
 noisereduce = [ "noisereduce~=3.0.3" ]
 openai = [ "pipecat-ai[websockets-base]" ]
-openpipe = [ "openpipe~=4.50.0" ]
+openpipe = [ "openpipe>=4.50.0,<6" ]
 openrouter = []
 perplexity = []
 playht = [ "pipecat-ai[websockets-base]" ]
