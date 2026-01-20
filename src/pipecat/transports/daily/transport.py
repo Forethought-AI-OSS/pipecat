@@ -482,7 +482,9 @@ class DailyTransportClient(EventHandler):
         """
         if not self._joined:
             return
-
+        if not self._client:
+            return
+        
         participant_id = None
         if isinstance(frame, (DailyTransportMessageFrame, DailyTransportMessageUrgentFrame)):
             participant_id = frame.participant_id
