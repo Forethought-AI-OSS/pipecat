@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2024–2025, Daily
+# Copyright (c) 2024-2026, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
@@ -28,9 +28,9 @@ from pipecat.frames.frames import (
     Frame,
     InputAudioRawFrame,
     OutputAudioRawFrame,
+    OutputTransportMessageFrame,
+    OutputTransportMessageUrgentFrame,
     StartFrame,
-    TransportMessageFrame,
-    TransportMessageUrgentFrame,
 )
 from pipecat.processors.frame_processor import FrameProcessorSetup
 from pipecat.serializers.base_serializer import FrameSerializer
@@ -50,6 +50,7 @@ class WebsocketClientParams(TransportParams):
     """
 
     add_wav_header: bool = True
+    additional_headers: Optional[dict[str, str]] = None
     serializer: Optional[FrameSerializer] = None
 
 
@@ -130,7 +131,11 @@ class WebsocketClientSession:
             return
 
         try:
-            self._websocket = await websocket_connect(uri=self._uri, open_timeout=10)
+            self._websocket = await websocket_connect(
+                uri=self._uri,
+                open_timeout=10,
+                additional_headers=self._params.additional_headers,
+            )
             self._client_task = self.task_manager.create_task(
                 self._client_task_handler(),
                 f"{self._transport_name}::WebsocketClientSession::_client_task_handler",
@@ -385,7 +390,9 @@ class WebsocketClientOutputTransport(BaseOutputTransport):
         await super().cleanup()
         await self._transport.cleanup()
 
-    async def send_message(self, frame: TransportMessageFrame | TransportMessageUrgentFrame):
+    async def send_message(
+        self, frame: OutputTransportMessageFrame | OutputTransportMessageUrgentFrame
+    ):
         """Send a transport message through the WebSocket.
 
         Args:

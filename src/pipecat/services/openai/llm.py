@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2024–2025, Daily
+# Copyright (c) 2024-2026, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
@@ -35,11 +35,17 @@ logger = logging.getLogger(__name__)
 class OpenAIContextAggregatorPair:
     """Pair of OpenAI context aggregators for user and assistant messages.
 
+    .. deprecated:: 0.0.99
+        `OpenAIContextAggregatorPair` is deprecated and will be removed in a future version.
+        Use the universal `LLMContext` and `LLMContextAggregatorPair` instead.
+        See `OpenAILLMContext` docstring for migration guide.
+
     Parameters:
         _user: User context aggregator for processing user messages.
         _assistant: Assistant context aggregator for processing assistant messages.
     """
 
+    # Aggregators handle deprecation warnings
     _user: "OpenAIUserContextAggregator"
     _assistant: "OpenAIAssistantContextAggregator"
 
@@ -106,10 +112,17 @@ class OpenAILLMService(BaseOpenAILLMService):
             the user and one for the assistant, encapsulated in an
             OpenAIContextAggregatorPair.
 
+        .. deprecated:: 0.0.99
+            `create_context_aggregator()` is deprecated and will be removed in a future version.
+            Use the universal `LLMContext` and `LLMContextAggregatorPair` instead.
+            See `OpenAILLMContext` docstring for migration guide.
         """
         context.set_llm_adapter(self.get_llm_adapter())
+
+        # Aggregators handle deprecation warnings
         user = OpenAIUserContextAggregator(context, params=user_params)
         assistant = OpenAIAssistantContextAggregator(context, params=assistant_params)
+
         return OpenAIContextAggregatorPair(_user=user, _assistant=assistant)
 
 
@@ -118,8 +131,14 @@ class OpenAIUserContextAggregator(LLMUserContextAggregator):
 
     Handles aggregation of user messages for OpenAI LLM services.
     Inherits all functionality from the base LLMUserContextAggregator.
+
+    .. deprecated:: 0.0.99
+        `OpenAIUserContextAggregator` is deprecated and will be removed in a future version.
+        Use the universal `LLMContext` and `LLMContextAggregatorPair` instead.
+        See `OpenAILLMContext` docstring for migration guide.
     """
 
+    # Super handles deprecation warning
     pass
 
 
@@ -129,7 +148,14 @@ class OpenAIAssistantContextAggregator(LLMAssistantContextAggregator):
     Handles aggregation of assistant messages for OpenAI LLM services,
     with specialized support for OpenAI's function calling format,
     tool usage tracking, and image message handling.
+
+    .. deprecated:: 0.0.99
+        `OpenAIAssistantContextAggregator` is deprecated and will be removed in a future version.
+        Use the universal `LLMContext` and `LLMContextAggregatorPair` instead.
+        See `OpenAILLMContext` docstring for migration guide.
     """
+
+    # Super handles deprecation warning
 
     async def _wait_for_assistant_message(
         self,

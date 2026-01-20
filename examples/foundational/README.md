@@ -80,7 +80,7 @@ uv run 07-interruptible.py -t twilio -x NGROK_HOST_NAME
 ### Common Utilities
 
 - **[17-detect-user-idle.py](./17-detect-user-idle.py)**: Handle inactive users (UserIdleProcessor)
-- **[24-stt-mute-filter.py](./24-stt-mute-filter.py)**: Selectively mute user input (STTMuteFilter)
+- **[24-user-mute-strategy.py](./24-user-mute-strategy.py)**: Selectively mute user input (LLMUserAggregator user mute strategies)
 - **[28-transcription-processor.py](./28-transcription-processor.py)**: Record conversation text (TranscriptProcessor)
 - **[30-observer.py](./30-observer.py)**: Access frame data (Custom observers)
 - **[31-heartbeats.py](./31-heartbeats.py)**: Detect idle pipelines (Pipeline monitoring)
@@ -105,7 +105,7 @@ uv run 07-interruptible.py -t twilio -x NGROK_HOST_NAME
 ### Vision & Multimodal
 
 - **[12a-describe-video-gemini-flash.py](./12a-describe-video-gemini-flash.py)**: Bot describes user's video (Video input, Multimodal LLMs)
-- **[26c-gemini-multimodal-live-video.py](./26c-gemini-multimodal-live-video.py)**: Gemini with video input (Streaming video, Function calls)
+- **[26c-gemini-live-video.py](./26c-gemini-live-video.py)**: Gemini with video input (Streaming video, Function calls)
 
 ### Voice & Language
 

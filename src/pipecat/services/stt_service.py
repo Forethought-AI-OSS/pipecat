@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2024–2025, Daily
+# Copyright (c) 2024-2026, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
@@ -20,8 +20,8 @@ from pipecat.frames.frames import (
     StartFrame,
     STTMuteFrame,
     STTUpdateSettingsFrame,
-    UserStartedSpeakingFrame,
-    UserStoppedSpeakingFrame,
+    VADUserStartedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.ai_service import AIService
@@ -35,6 +35,25 @@ class STTService(AIService):
     Provides common functionality for STT services including audio passthrough,
     muting, settings management, and audio processing. Subclasses must implement
     the run_stt method to provide actual speech recognition.
+
+    Event handlers:
+        on_connected: Called when connected to the STT service.
+        on_disconnected: Called when disconnected from the STT service.
+        on_connection_error: Called when a connection to the STT service error occurs.
+
+    Example::
+
+        @stt.event_handler("on_connected")
+        async def on_connected(stt: STTService):
+            logger.debug(f"STT connected")
+
+        @stt.event_handler("on_disconnected")
+        async def on_disconnected(stt: STTService):
+            logger.debug(f"STT disconnected")
+
+        @stt.event_handler("on_connection_error")
+        async def on_connection_error(stt: STTService, error: str):
+            logger.error(f"STT connection error: {error}")
     """
 
     def __init__(
@@ -61,6 +80,10 @@ class STTService(AIService):
         self._tracing_enabled: bool = False
         self._muted: bool = False
         self._user_id: str = ""
+
+        self._register_event_handler("on_connected")
+        self._register_event_handler("on_disconnected")
+        self._register_event_handler("on_connection_error")
 
     @property
     def is_muted(self) -> bool:
@@ -229,20 +252,15 @@ class SegmentedSTTService(STTService):
         """Process frames, handling VAD events and audio segmentation."""
         await super().process_frame(frame, direction)
 
-        if isinstance(frame, UserStartedSpeakingFrame):
+        if isinstance(frame, VADUserStartedSpeakingFrame):
             await self._handle_user_started_speaking(frame)
-        elif isinstance(frame, UserStoppedSpeakingFrame):
+        elif isinstance(frame, VADUserStoppedSpeakingFrame):
             await self._handle_user_stopped_speaking(frame)
 
-    async def _handle_user_started_speaking(self, frame: UserStartedSpeakingFrame):
-        if frame.emulated:
-            return
+    async def _handle_user_started_speaking(self, frame: VADUserStartedSpeakingFrame):
         self._user_speaking = True
 
-    async def _handle_user_stopped_speaking(self, frame: UserStoppedSpeakingFrame):
-        if frame.emulated:
-            return
-
+    async def _handle_user_stopped_speaking(self, frame: VADUserStoppedSpeakingFrame):
         self._user_speaking = False
 
         content = io.BytesIO()
@@ -292,15 +310,6 @@ class WebsocketSTTService(STTService, WebsocketService):
 
     Combines STT functionality with websocket connectivity, providing automatic
     error handling and reconnection capabilities.
-
-    Event handlers:
-        on_connection_error: Called when a websocket connection error occurs.
-
-    Example::
-
-        @stt.event_handler("on_connection_error")
-        async def on_connection_error(stt: STTService, error: str):
-            logger.error(f"STT connection error: {error}")
     """
 
     def __init__(self, *, reconnect_on_error: bool = True, **kwargs):
@@ -312,8 +321,7 @@ class WebsocketSTTService(STTService, WebsocketService):
         """
         STTService.__init__(self, **kwargs)
         WebsocketService.__init__(self, reconnect_on_error=reconnect_on_error, **kwargs)
-        self._register_event_handler("on_connection_error")
 
     async def _report_error(self, error: ErrorFrame):
         await self._call_event_handler("on_connection_error", error.error)
-        await self.push_error(error)
+        await self.push_error_frame(error)

@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2024–2025, Daily
+# Copyright (c) 2024-2026, Daily
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
@@ -48,10 +48,7 @@ transport_params = {
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info(f"Starting bot")
 
-    stt = CartesiaSTTService(
-        api_key=os.getenv("CARTESIA_API_KEY"),
-        base_url=os.getenv("CARTESIA_BASE_URL"),
-    )
+    stt = CartesiaSTTService(api_key=os.getenv("CARTESIA_API_KEY"))
 
     tl = TranscriptionLogger()
 
