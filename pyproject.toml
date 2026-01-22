@@ -28,7 +28,7 @@ dependencies = [
     "Markdown~=3.7",
     "nltk~=3.6.7",
     "numpy~=1.26.4",
-    "Pillow~=10.4.0",
+    "Pillow>=11.1.0,<12",
     "pydantic==2.11.7",
     "pyloudnorm~=0.1.1",
     "resampy~=0.4.3",
