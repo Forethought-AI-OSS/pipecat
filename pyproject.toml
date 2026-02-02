@@ -21,14 +21,14 @@ classifiers = [
 ]
 dependencies = [
     "aiofiles>=24.1.0,<25",
-    "aiohttp~=3.11.12",
+    "aiohttp~=3.13.3",
     "audioop-lts~=0.2.1; python_version>='3.13'",
     "docstring_parser~=0.16",
     "loguru~=0.7.3",
     "Markdown~=3.7",
     "nltk~=3.6.7",
     "numpy~=1.26.4",
-    "Pillow~=10.4.0",
+    "Pillow>=11.1.0,<12",
     "pydantic==2.11.7",
     "pyloudnorm~=0.1.1",
     "resampy~=0.4.3",
