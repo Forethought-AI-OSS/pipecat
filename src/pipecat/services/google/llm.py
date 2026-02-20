@@ -40,7 +40,6 @@ from pipecat.frames.frames import (
     LLMThoughtStartFrame,
     LLMThoughtTextFrame,
     LLMUpdateSettingsFrame,
-    UserImageRawFrame,
 )
 from pipecat.metrics.metrics import LLMTokenUsage
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -198,22 +197,6 @@ class GoogleAssistantContextAggregator(OpenAIAssistantContextAggregator):
                 for part in message.parts:
                     if part.function_response and part.function_response.id == tool_call_id:
                         part.function_response.response = {"value": json.dumps(result)}
-
-    async def handle_user_image_frame(self, frame: UserImageRawFrame):
-        """Handle user image frame.
-
-        Args:
-            frame: Frame containing user image data and request context.
-        """
-        await self._update_function_call_result(
-            frame.request.function_name, frame.request.tool_call_id, "COMPLETED"
-        )
-        self._context.add_image_frame_message(
-            format=frame.format,
-            size=frame.size,
-            image=frame.image,
-            text=frame.request.context,
-        )
 
 
 @dataclass
@@ -816,11 +799,15 @@ class GoogleLLMService(LLMService):
         """Create the Gemini client instance. Subclasses can override this."""
         self._client = genai.Client(api_key=self._api_key, http_options=self._http_options)
 
-    async def run_inference(self, context: LLMContext | OpenAILLMContext) -> Optional[str]:
+    async def run_inference(
+        self, context: LLMContext | OpenAILLMContext, max_tokens: Optional[int] = None
+    ) -> Optional[str]:
         """Run a one-shot, out-of-band (i.e. out-of-pipeline) inference with the given LLM context.
 
         Args:
             context: The LLM context containing conversation history.
+            max_tokens: Optional maximum number of tokens to generate. If provided,
+                overrides the service's default max_tokens setting.
 
         Returns:
             The LLM's response as a string, or None if no response is generated.
@@ -844,6 +831,10 @@ class GoogleLLMService(LLMService):
         generation_params = self._build_generation_params(
             system_instruction=system, tools=tools if tools else None
         )
+
+        # Override max_output_tokens if provided
+        if max_tokens is not None:
+            generation_params["max_output_tokens"] = max_tokens
 
         generation_config = GenerateContentConfig(**generation_params)
 
@@ -1040,7 +1031,7 @@ class GoogleLLMService(LLMService):
                                     await self.push_frame(LLMThoughtEndFrame())
                                 else:
                                     accumulated_text += part.text
-                                    await self.push_frame(LLMTextFrame(part.text))
+                                    await self._push_llm_text(part.text)
                             elif part.function_call:
                                 function_call = part.function_call
                                 function_call_id = function_call.id or str(uuid.uuid4())

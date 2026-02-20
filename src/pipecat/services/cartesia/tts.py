@@ -8,7 +8,6 @@
 
 import base64
 import json
-import uuid
 import warnings
 from enum import Enum
 from typing import AsyncGenerator, List, Literal, Optional
@@ -307,7 +306,6 @@ class CartesiaTTSService(AudioContextWordTTSService):
         self.set_model_name(model)
         self.set_voice(voice_id)
 
-        self._context_id = None
         self._receive_task = None
 
     def can_generate_metrics(self) -> bool:
@@ -430,7 +428,7 @@ class CartesiaTTSService(AudioContextWordTTSService):
         msg = {
             "transcript": text,
             "continue": continue_transcript,
-            "context_id": self._context_id,
+            "context_id": self.get_active_audio_context_id(),
             "model_id": self.model_name,
             "voice": voice_config,
             "output_format": self._settings["output_format"],
@@ -523,7 +521,7 @@ class CartesiaTTSService(AudioContextWordTTSService):
         except Exception as e:
             await self.push_error(error_msg=f"Unknown error occurred: {e}", exception=e)
         finally:
-            self._context_id = None
+            await self.remove_active_audio_context()
             self._websocket = None
             await self._call_event_handler("on_disconnected")
 
@@ -533,37 +531,39 @@ class CartesiaTTSService(AudioContextWordTTSService):
         raise Exception("Websocket not connected")
 
     async def _handle_interruption(self, frame: InterruptionFrame, direction: FrameDirection):
+        context_id = self.get_active_audio_context_id()
         await super()._handle_interruption(frame, direction)
         await self.stop_all_metrics()
-        if self._context_id:
-            cancel_msg = json.dumps({"context_id": self._context_id, "cancel": True})
+        if context_id:
+            cancel_msg = json.dumps({"context_id": context_id, "cancel": True})
             await self._get_websocket().send(cancel_msg)
-            self._context_id = None
 
     async def flush_audio(self):
         """Flush any pending audio and finalize the current context."""
-        if not self._context_id or not self._websocket:
+        context_id = self.get_active_audio_context_id()
+        if not context_id or not self._websocket:
             return
         logger.trace(f"{self}: flushing audio")
         msg = self._build_msg(text="", continue_transcript=False)
         await self._websocket.send(msg)
-        self._context_id = None
+        self.reset_active_audio_context()
 
     async def _process_messages(self):
         async for message in self._get_websocket():
             msg = json.loads(message)
             if not msg or not self.audio_context_available(msg["context_id"]):
                 continue
+            ctx_id = msg["context_id"]
             if msg["type"] == "done":
                 await self.stop_ttfb_metrics()
-                await self.add_word_timestamps([("TTSStoppedFrame", 0), ("Reset", 0)])
-                await self.remove_audio_context(msg["context_id"])
+                await self.add_word_timestamps([("TTSStoppedFrame", 0), ("Reset", 0)], ctx_id)
+                await self.remove_audio_context(ctx_id)
             elif msg["type"] == "timestamps":
                 # Process the timestamps based on language before adding them
                 processed_timestamps = self._process_word_timestamps_for_language(
                     msg["word_timestamps"]["words"], msg["word_timestamps"]["start"]
                 )
-                await self.add_word_timestamps(processed_timestamps)
+                await self.add_word_timestamps(processed_timestamps, ctx_id)
             elif msg["type"] == "chunk":
                 await self.stop_ttfb_metrics()
                 await self.start_word_timestamps()
@@ -571,13 +571,14 @@ class CartesiaTTSService(AudioContextWordTTSService):
                     audio=base64.b64decode(msg["data"]),
                     sample_rate=self.sample_rate,
                     num_channels=1,
+                    context_id=ctx_id,
                 )
-                await self.append_to_audio_context(msg["context_id"], frame)
+                await self.append_to_audio_context(ctx_id, frame)
             elif msg["type"] == "error":
-                await self.push_frame(TTSStoppedFrame())
+                await self.push_frame(TTSStoppedFrame(context_id=ctx_id))
                 await self.stop_all_metrics()
                 await self.push_error(error_msg=f"Error: {msg}")
-                self._context_id = None
+                self.reset_active_audio_context()
             else:
                 await self.push_error(error_msg=f"Error, unknown message type: {msg}")
 
@@ -590,11 +591,12 @@ class CartesiaTTSService(AudioContextWordTTSService):
             await self._connect_websocket()
 
     @traced_tts
-    async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
+    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
         """Generate speech from text using Cartesia's streaming API.
 
         Args:
             text: The text to synthesize into speech.
+            context_id: The context ID for tracking audio frames.
 
         Yields:
             Frame: Audio frames containing the synthesized speech.
@@ -605,11 +607,10 @@ class CartesiaTTSService(AudioContextWordTTSService):
             if not self._websocket or self._websocket.state is State.CLOSED:
                 await self._connect()
 
-            if not self._context_id:
+            if not self.has_active_audio_context():
                 await self.start_ttfb_metrics()
-                yield TTSStartedFrame()
-                self._context_id = str(uuid.uuid4())
-                await self.create_audio_context(self._context_id)
+                yield TTSStartedFrame(context_id=context_id)
+                await self.create_audio_context(context_id)
 
             msg = self._build_msg(text=text)
 
@@ -618,7 +619,7 @@ class CartesiaTTSService(AudioContextWordTTSService):
                 await self.start_tts_usage_metrics(text)
             except Exception as e:
                 yield ErrorFrame(error=f"Unknown error occurred: {e}")
-                yield TTSStoppedFrame()
+                yield TTSStoppedFrame(context_id=context_id)
                 await self._disconnect()
                 await self._connect()
                 return
@@ -761,11 +762,12 @@ class CartesiaHttpTTSService(TTSService):
         await self._client.close()
 
     @traced_tts
-    async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
+    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
         """Generate speech from text using Cartesia's HTTP API.
 
         Args:
             text: The text to synthesize into speech.
+            context_id: The context ID for tracking audio frames.
 
         Yields:
             Frame: Audio frames containing the synthesized speech.
@@ -808,7 +810,7 @@ class CartesiaHttpTTSService(TTSService):
             if self._settings["pronunciation_dict_id"]:
                 payload["pronunciation_dict_id"] = self._settings["pronunciation_dict_id"]
 
-            yield TTSStartedFrame()
+            yield TTSStartedFrame(context_id=context_id)
 
             session = await self._client._get_session()
 
@@ -834,6 +836,7 @@ class CartesiaHttpTTSService(TTSService):
                 audio=audio_data,
                 sample_rate=self.sample_rate,
                 num_channels=1,
+                context_id=context_id,
             )
 
             yield frame
@@ -842,4 +845,4 @@ class CartesiaHttpTTSService(TTSService):
             yield ErrorFrame(error=f"Unknown error occurred: {e}")
         finally:
             await self.stop_ttfb_metrics()
-            yield TTSStoppedFrame()
+            yield TTSStoppedFrame(context_id=context_id)

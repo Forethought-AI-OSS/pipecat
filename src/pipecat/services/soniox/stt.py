@@ -6,7 +6,6 @@
 
 """Soniox speech-to-text service implementation."""
 
-import asyncio
 import json
 import time
 from typing import AsyncGenerator, List, Optional
@@ -21,9 +20,10 @@ from pipecat.frames.frames import (
     InterimTranscriptionFrame,
     StartFrame,
     TranscriptionFrame,
-    UserStoppedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
+from pipecat.services.stt_latency import SONIOX_TTFS_P99
 from pipecat.services.stt_service import WebsocketSTTService
 from pipecat.transcriptions.language import Language
 from pipecat.utils.time import time_now_iso8601
@@ -92,7 +92,7 @@ class SonioxInputParams(BaseModel):
         client_reference_id: Client reference ID to use for transcription.
     """
 
-    model: str = "stt-rt-preview"
+    model: str = "stt-rt-v4"
 
     audio_format: Optional[str] = "pcm_s16le"
     num_channels: Optional[int] = 1
@@ -151,7 +151,8 @@ class SonioxSTTService(WebsocketSTTService):
         url: str = "wss://stt-rt.soniox.com/transcribe-websocket",
         sample_rate: Optional[int] = None,
         params: Optional[SonioxInputParams] = None,
-        vad_force_turn_endpoint: bool = False,
+        vad_force_turn_endpoint: bool = True,
+        ttfs_p99_latency: Optional[float] = SONIOX_TTFS_P99,
         **kwargs,
     ):
         """Initialize the Soniox STT service.
@@ -162,10 +163,19 @@ class SonioxSTTService(WebsocketSTTService):
             sample_rate: Audio sample rate.
             params: Additional configuration parameters, such as language hints, context and
                 speaker diarization.
-            vad_force_turn_endpoint: Listen to `UserStoppedSpeakingFrame` to send finalize message to Soniox. If disabled, Soniox will detect the end of the speech.
+            vad_force_turn_endpoint: Listen to `VADUserStoppedSpeakingFrame` to send finalize message to Soniox.
+                If disabled, Soniox will detect the end of the speech. Defaults to True.
+            ttfs_p99_latency: P99 latency from speech end to final transcript in seconds.
+                Override for your deployment. See https://github.com/pipecat-ai/stt-benchmark
             **kwargs: Additional arguments passed to the STTService.
         """
-        super().__init__(sample_rate=sample_rate, **kwargs)
+        super().__init__(
+            sample_rate=sample_rate,
+            ttfs_p99_latency=ttfs_p99_latency,
+            keepalive_timeout=1,
+            keepalive_interval=5,
+            **kwargs,
+        )
         params = params or SonioxInputParams()
 
         self._api_key = api_key
@@ -178,7 +188,6 @@ class SonioxSTTService(WebsocketSTTService):
         self._last_tokens_received: Optional[float] = None
 
         self._receive_task = None
-        self._keepalive_task = None
 
     async def start(self, frame: StartFrame):
         """Start the Soniox STT websocket connection.
@@ -247,7 +256,7 @@ class SonioxSTTService(WebsocketSTTService):
         """
         await super().process_frame(frame, direction)
 
-        if isinstance(frame, UserStoppedSpeakingFrame) and self._vad_force_turn_endpoint:
+        if isinstance(frame, VADUserStoppedSpeakingFrame) and self._vad_force_turn_endpoint:
             # Send finalize message to Soniox so we get the final tokens asap.
             if self._websocket and self._websocket.state is State.OPEN:
                 await self._websocket.send(FINALIZE_MESSAGE)
@@ -264,15 +273,12 @@ class SonioxSTTService(WebsocketSTTService):
 
         Establishes websocket connection and starts receive and keepalive tasks.
         """
-        await super()._connect()
-
         await self._connect_websocket()
+
+        await super()._connect()
 
         if self._websocket and not self._receive_task:
             self._receive_task = self.create_task(self._receive_task_handler(self._report_error))
-
-        if self._websocket and not self._keepalive_task:
-            self._keepalive_task = self.create_task(self._keepalive_task_handler())
 
     async def _disconnect(self):
         """Disconnect from the Soniox service.
@@ -280,10 +286,6 @@ class SonioxSTTService(WebsocketSTTService):
         Cleans up tasks and closes websocket connection.
         """
         await super()._disconnect()
-
-        if self._keepalive_task:
-            await self.cancel_task(self._keepalive_task)
-            self._keepalive_task = None
 
         if self._receive_task:
             await self.cancel_task(self._receive_task)
@@ -374,12 +376,15 @@ class SonioxSTTService(WebsocketSTTService):
         async def send_endpoint_transcript():
             if self._final_transcription_buffer:
                 text = "".join(map(lambda token: token["text"], self._final_transcription_buffer))
+                # Soniox only pushes TranscriptionFrame when an end token is received,
+                # so every TranscriptionFrame is inherently finalized
                 await self.push_frame(
                     TranscriptionFrame(
                         text=text,
                         user_id=self._user_id,
                         timestamp=time_now_iso8601(),
                         result=self._final_transcription_buffer,
+                        finalized=True,
                     )
                 )
                 await self._handle_transcription(text, is_final=True)
@@ -454,17 +459,10 @@ class SonioxSTTService(WebsocketSTTService):
             except Exception as e:
                 logger.warning(f"Error processing message: {e}")
 
-    async def _keepalive_task_handler(self):
-        """Connection has to be open all the time."""
-        try:
-            while True:
-                logger.trace("Sending keepalive message")
-                if self._websocket and self._websocket.state is State.OPEN:
-                    await self._websocket.send(KEEPALIVE_MESSAGE)
-                else:
-                    logger.debug("WebSocket connection closed.")
-                    break
-                await asyncio.sleep(5)
+    async def _send_keepalive(self, silence: bytes):
+        """Send a Soniox protocol-level keepalive message.
 
-        except Exception as e:
-            logger.debug(f"Keepalive task stopped: {e}")
+        Args:
+            silence: Silent PCM audio bytes (unused, Soniox uses a protocol message).
+        """
+        await self._websocket.send(KEEPALIVE_MESSAGE)

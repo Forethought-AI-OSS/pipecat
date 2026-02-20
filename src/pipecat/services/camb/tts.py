@@ -199,9 +199,10 @@ class CambTTSService(TTSService):
         """
         super().__init__(sample_rate=sample_rate, **kwargs)
 
-        params = params or CambTTSService.InputParams()
+        self._api_key = api_key
+        self._timeout = timeout
 
-        self._client = AsyncCambAI(api_key=api_key, timeout=timeout)
+        params = params or CambTTSService.InputParams()
 
         # Warn if sample rate doesn't match model's supported rate
         if sample_rate and sample_rate != MODEL_SAMPLE_RATES.get(model):
@@ -221,6 +222,8 @@ class CambTTSService(TTSService):
         self.set_model_name(model)
         self.set_voice(str(voice_id))
         self._voice_id = voice_id
+
+        self._client = None
 
     def can_generate_metrics(self) -> bool:
         """Check if this service can generate processing metrics.
@@ -249,16 +252,19 @@ class CambTTSService(TTSService):
         """
         await super().start(frame)
 
+        self._client = AsyncCambAI(api_key=self._api_key, timeout=self._timeout)
+
         # Use model-specific sample rate if not explicitly specified
         if not self._init_sample_rate:
             self._sample_rate = MODEL_SAMPLE_RATES.get(self.model_name, 22050)
 
     @traced_tts
-    async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
+    async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame, None]:
         """Generate speech from text using Camb.ai's TTS API.
 
         Args:
             text: The text to synthesize into speech (max 3000 characters).
+            context_id: The context ID for tracking audio frames.
 
         Yields:
             Frame: Audio frames containing the synthesized speech.
@@ -287,7 +293,9 @@ class CambTTSService(TTSService):
                 tts_kwargs["user_instructions"] = self._settings["user_instructions"]
 
             await self.start_tts_usage_metrics(text)
-            yield TTSStartedFrame()
+            yield TTSStartedFrame(context_id=context_id)
+
+            assert self._client is not None, "Camb.ai TTS service not initialized"
 
             # Buffer for aligning chunks to 2-byte boundaries (16-bit PCM)
             audio_buffer = b""
@@ -305,6 +313,7 @@ class CambTTSService(TTSService):
                             audio=aligned_audio,
                             sample_rate=self.sample_rate,
                             num_channels=1,
+                            context_id=context_id,
                         )
 
             # Yield any remaining complete samples
@@ -315,9 +324,10 @@ class CambTTSService(TTSService):
                         audio=aligned_audio,
                         sample_rate=self.sample_rate,
                         num_channels=1,
+                        context_id=context_id,
                     )
 
         except Exception as e:
             yield ErrorFrame(error=f"Camb.ai TTS error: {e}")
         finally:
-            yield TTSStoppedFrame()
+            yield TTSStoppedFrame(context_id=context_id)

@@ -31,6 +31,7 @@ from pipecat.frames.frames import (
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.aws.sagemaker.bidi_client import SageMakerBidiClient
+from pipecat.services.stt_latency import DEEPGRAM_SAGEMAKER_TTFS_P99
 from pipecat.services.stt_service import STTService
 from pipecat.transcriptions.language import Language
 from pipecat.utils.time import time_now_iso8601
@@ -81,6 +82,7 @@ class DeepgramSageMakerSTTService(STTService):
         region: str,
         sample_rate: Optional[int] = None,
         live_options: Optional[LiveOptions] = None,
+        ttfs_p99_latency: Optional[float] = DEEPGRAM_SAGEMAKER_TTFS_P99,
         **kwargs,
     ):
         """Initialize the Deepgram SageMaker STT service.
@@ -93,10 +95,12 @@ class DeepgramSageMakerSTTService(STTService):
                 live_options or defaults to the value from StartFrame.
             live_options: Deepgram LiveOptions for detailed configuration. If None,
                 uses sensible defaults (nova-3 model, English, interim results enabled).
+            ttfs_p99_latency: P99 latency from speech end to final transcript in seconds.
+                Override for your deployment. See https://github.com/pipecat-ai/stt-benchmark
             **kwargs: Additional arguments passed to the parent STTService.
         """
         sample_rate = sample_rate or (live_options.sample_rate if live_options else None)
-        super().__init__(sample_rate=sample_rate, **kwargs)
+        super().__init__(sample_rate=sample_rate, ttfs_p99_latency=ttfs_p99_latency, **kwargs)
 
         self._endpoint_name = endpoint_name
         self._region = region
@@ -363,11 +367,7 @@ class DeepgramSageMakerSTTService(STTService):
         if not transcript.strip():
             return
 
-        # Stop TTFB metrics on first transcript
-        await self.stop_ttfb_metrics()
-
         is_final = parsed.get("is_final", False)
-        speech_final = parsed.get("speech_final", False)
 
         # Extract language if available
         language = None
@@ -375,8 +375,12 @@ class DeepgramSageMakerSTTService(STTService):
             language = alternatives[0]["languages"][0]
             language = Language(language)
 
-        if is_final and speech_final:
-            # Final transcription
+        if is_final:
+            # Check if this response is from a finalize() call.
+            # Only mark as finalized when both we requested it AND Deepgram confirms it.
+            from_finalize = parsed.get("from_finalize", False)
+            if from_finalize:
+                self.confirm_finalize()
             await self.push_frame(
                 TranscriptionFrame(
                     transcript,
@@ -417,9 +421,8 @@ class DeepgramSageMakerSTTService(STTService):
         """
         pass
 
-    async def start_metrics(self):
-        """Start TTFB and processing metrics collection."""
-        await self.start_ttfb_metrics()
+    async def _start_metrics(self):
+        """Start processing metrics collection."""
         await self.start_processing_metrics()
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
@@ -433,12 +436,14 @@ class DeepgramSageMakerSTTService(STTService):
 
         # Start metrics when user starts speaking (if VAD is not provided by Deepgram)
         if isinstance(frame, VADUserStartedSpeakingFrame):
-            await self.start_metrics()
+            await self._start_metrics()
         elif isinstance(frame, VADUserStoppedSpeakingFrame):
-            # Send finalize message to Deepgram when user stops speaking
-            # This tells Deepgram to flush any remaining audio and return final results
+            # https://developers.deepgram.com/docs/finalize
+            # Mark that we're awaiting a from_finalize response
+            self.request_finalize()
             if self._client and self._client.is_active:
                 try:
                     await self._client.send_json({"type": "Finalize"})
                 except Exception as e:
                     logger.warning(f"Error sending Finalize message: {e}")
+            logger.trace(f"Triggered finalize event on: {frame.name=}, {direction=}")
