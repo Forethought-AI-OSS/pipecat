@@ -14,7 +14,6 @@ and LLM processing.
 import asyncio
 import time
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -36,12 +35,15 @@ from pipecat.audio.turn.base_turn_analyzer import BaseTurnParams
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.metrics.metrics import MetricsData
 from pipecat.transcriptions.language import Language
+from pipecat.utils.text.base_text_aggregator import AggregationType
 from pipecat.utils.time import nanoseconds_to_str
 from pipecat.utils.utils import obj_count, obj_id
 
 if TYPE_CHECKING:
     from pipecat.processors.aggregators.llm_context import LLMContext, NotGiven
     from pipecat.processors.frame_processor import FrameProcessor
+    from pipecat.services.settings import ServiceSettings
+    from pipecat.utils.context.llm_context_summarization import LLMContextSummaryConfig
     from pipecat.utils.tracing.tracing_context import TracingContext
 
 
@@ -390,16 +392,6 @@ class LLMTextFrame(TextFrame):
         super().__post_init__()
         # LLM services send text frames with all necessary spaces included
         self.includes_inter_frame_spaces = True
-
-
-class AggregationType(str, Enum):
-    """Built-in aggregation strings."""
-
-    SENTENCE = "sentence"
-    WORD = "word"
-
-    def __str__(self):
-        return self.value
 
 
 @dataclass
@@ -2000,6 +1992,32 @@ class LLMFullResponseEndFrame(ControlFrame):
 
 
 @dataclass
+class LLMAssistantPushAggregationFrame(ControlFrame):
+    """Frame that forces the LLM assistant aggregator to push its current aggregation to context.
+
+    When received by ``LLMAssistantAggregator``, any text that has been accumulated
+    in the aggregation buffer is immediately committed to the conversation context as
+    an assistant message, without waiting for an ``LLMFullResponseEndFrame``.
+    """
+
+
+@dataclass
+class LLMSummarizeContextFrame(ControlFrame):
+    """Frame requesting on-demand context summarization.
+
+    Push this frame into the pipeline to trigger a manual context summarization.
+
+    Parameters:
+        config: Optional per-request override for summary generation settings
+            (prompt, token budget, messages to keep). If ``None``, the
+            summarizer's default :class:`~pipecat.utils.context.llm_context_summarization.LLMContextSummaryConfig`
+            is used.
+    """
+
+    config: Optional["LLMContextSummaryConfig"] = None
+
+
+@dataclass
 class LLMContextSummaryRequestFrame(ControlFrame):
     """Frame requesting context summarization from an LLM service.
 
@@ -2018,6 +2036,8 @@ class LLMContextSummaryRequestFrame(ControlFrame):
             the summary text.
         summarization_prompt: System prompt instructing the LLM how to generate
             the summary.
+        summarization_timeout: Maximum time in seconds for the LLM to generate a
+            summary. When None, a default timeout of 120s is applied.
     """
 
     request_id: str
@@ -2025,6 +2045,7 @@ class LLMContextSummaryRequestFrame(ControlFrame):
     min_messages_to_keep: int
     target_context_tokens: int
     summarization_prompt: str
+    summarization_timeout: Optional[float] = None
 
 
 @dataclass
@@ -2117,16 +2138,24 @@ class TTSStoppedFrame(ControlFrame):
 
 
 @dataclass
-class ServiceUpdateSettingsFrame(ControlFrame):
+class ServiceUpdateSettingsFrame(ControlFrame, UninterruptibleFrame):
     """Base frame for updating service settings.
 
-    A control frame containing a request to update service settings.
+    Supports both a ``settings`` dict (for backward compatibility) and a
+    ``delta`` object.  When both are provided, ``delta`` takes precedence.
 
     Parameters:
         settings: Dictionary of setting name to value mappings.
+
+            .. deprecated:: 0.0.104
+                Use ``delta`` with a typed settings object instead.
+
+        delta: :class:`~pipecat.services.settings.ServiceSettings` delta-mode
+            object describing the fields to change.
     """
 
-    settings: Mapping[str, Any]
+    settings: Mapping[str, Any] = field(default_factory=dict)
+    delta: Optional["ServiceSettings"] = None
 
 
 @dataclass
