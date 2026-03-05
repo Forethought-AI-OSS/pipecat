@@ -155,7 +155,6 @@ docs = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-"pipecat" = ["py.typed"]
 "pipecat.audio.dtmf" = [
     "src/pipecat/audio/dtmf/dtmf-0.wav",
     "src/pipecat/audio/dtmf/dtmf-1.wav",
