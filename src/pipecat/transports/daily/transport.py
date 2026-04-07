@@ -563,6 +563,9 @@ class DailyTransportClient(EventHandler):
             self._join_message_queue.append(frame)
             return None
 
+        if not self._client:
+            return None
+
         participant_id = None
         if isinstance(
             frame, (DailyOutputTransportMessageFrame, DailyOutputTransportMessageUrgentFrame)
