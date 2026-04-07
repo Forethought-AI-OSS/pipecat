@@ -27,7 +27,6 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
-from pydantic import BaseModel
 
 from pipecat.audio.dtmf.types import KeypadEntry
 from pipecat.audio.resamplers.soxr_stream_resampler import SOXRStreamAudioResampler
@@ -96,8 +95,8 @@ class GenesysAudioHookSerializer(FrameSerializer):
     - Text WebSocket frames for JSON control messages
     - Binary WebSocket frames for audio data
 
-    Example usage:
-        ```python
+    Example usage::
+
         serializer = GenesysAudioHookSerializer(
             params=GenesysAudioHookSerializer.InputParams(
                 channel=AudioHookChannel.EXTERNAL,
@@ -123,9 +122,8 @@ class GenesysAudioHookSerializer(FrameSerializer):
 
         # Set output variables to return to Architect
         serializer.set_output_variables({"intent": "billing", "resolved": True})
-        ```
 
-    Attributes:
+    Parameters:
         PROTOCOL_VERSION: The AudioHook protocol version (currently "2").
     """
 
@@ -134,7 +132,7 @@ class GenesysAudioHookSerializer(FrameSerializer):
     class InputParams(FrameSerializer.InputParams):
         """Configuration parameters for GenesysAudioHookSerializer.
 
-        Attributes:
+        Parameters:
             genesys_sample_rate: Sample rate used by Genesys (default: 8000 Hz).
             sample_rate: Optional override for pipeline input sample rate.
             channel: Which audio channels to process (external, internal, both).
@@ -247,8 +245,8 @@ class GenesysAudioHookSerializer(FrameSerializer):
         Args:
             variables: Dictionary of custom variables to send to Genesys.
 
-        Example:
-            ```python
+        Example::
+
             # During the conversation, collect data and set it
             serializer.set_output_variables({
                 "intent": "billing_inquiry",
@@ -256,7 +254,6 @@ class GenesysAudioHookSerializer(FrameSerializer):
                 "summary": "Customer asked about their bill",
                 "transfer_to": "billing_queue"
             })
-            ```
         """
         self._output_variables = variables
         logger.debug(f"Output variables set: {variables}")
@@ -337,8 +334,7 @@ class GenesysAudioHookSerializer(FrameSerializer):
         if include_position:
             msg["position"] = self._format_position(self._position)
 
-        if parameters:
-            msg["parameters"] = parameters
+        msg["parameters"] = parameters if parameters is not None else {}
 
         return msg
 
@@ -415,8 +411,8 @@ class GenesysAudioHookSerializer(FrameSerializer):
         Returns:
             Dictionary of the closed response message.
 
-        Example:
-            ```python
+        Example::
+
             # Pass custom data back to Genesys
             serializer.create_closed_response(
                 output_variables={
@@ -425,7 +421,6 @@ class GenesysAudioHookSerializer(FrameSerializer):
                     "summary": "Customer asked about their bill"
                 }
             )
-            ```
         """
         parameters: Optional[Dict[str, Any]] = None
 

@@ -7,7 +7,7 @@
 """Base classes for Large Language Model services with function calling support."""
 
 import asyncio
-import inspect
+import json
 import warnings
 from dataclasses import dataclass
 from typing import (
@@ -23,6 +23,8 @@ from typing import (
 )
 
 from loguru import logger
+from websockets.exceptions import ConnectionClosed
+from websockets.protocol import State
 
 from pipecat.adapters.base_llm_adapter import BaseLLMAdapter
 from pipecat.adapters.schemas.direct_function import DirectFunction, DirectFunctionWrapper
@@ -30,6 +32,7 @@ from pipecat.adapters.services.open_ai_adapter import OpenAILLMAdapter
 from pipecat.frames.frames import (
     CancelFrame,
     EndFrame,
+    ErrorFrame,
     Frame,
     FunctionCallCancelFrame,
     FunctionCallFromLLM,
@@ -46,20 +49,15 @@ from pipecat.frames.frames import (
     LLMTextFrame,
     LLMUpdateSettingsFrame,
     StartFrame,
-    UserImageRequestFrame,
 )
 from pipecat.processors.aggregators.llm_context import (
     LLMContext,
     LLMSpecificMessage,
 )
-from pipecat.processors.aggregators.llm_response import (
-    LLMAssistantAggregatorParams,
-    LLMUserAggregatorParams,
-)
-from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.ai_service import AIService
 from pipecat.services.settings import LLMSettings
+from pipecat.services.websocket_service import WebsocketService
 from pipecat.turns.user_turn_completion_mixin import UserTurnCompletionLLMServiceMixin
 from pipecat.utils.context.llm_context_summarization import (
     DEFAULT_SUMMARIZATION_TIMEOUT,
@@ -106,7 +104,7 @@ class FunctionCallParams:
     tool_call_id: str
     arguments: Mapping[str, Any]
     llm: "LLMService"
-    context: OpenAILLMContext | LLMContext
+    context: LLMContext
     result_callback: FunctionCallResultCallback
 
 
@@ -127,7 +125,6 @@ class FunctionCallRegistryItem:
     function_name: Optional[str]
     handler: FunctionCallHandler | "DirectFunctionWrapper"
     cancel_on_interruption: bool
-    handler_deprecated: bool
     timeout_secs: Optional[float] = None
 
 
@@ -150,7 +147,7 @@ class FunctionCallRunnerItem:
     function_name: str
     tool_call_id: str
     arguments: Mapping[str, Any]
-    context: OpenAILLMContext | LLMContext
+    context: LLMContext
     run_llm: Optional[bool] = None
 
 
@@ -187,7 +184,7 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
     def __init__(
         self,
         run_in_parallel: bool = True,
-        function_call_timeout_secs: float = 10.0,
+        function_call_timeout_secs: Optional[float] = None,
         settings: Optional[LLMSettings] = None,
         **kwargs,
     ):
@@ -196,8 +193,8 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
         Args:
             run_in_parallel: Whether to run function calls in parallel or sequentially.
                 Defaults to True.
-            function_call_timeout_secs: Timeout in seconds for deferred function calls.
-                Defaults to 10.0 seconds.
+            function_call_timeout_secs: Optional timeout in seconds for deferred function
+                calls.
             settings: The runtime-updatable settings for the LLM service.
             **kwargs: Additional arguments passed to the parent AIService.
 
@@ -212,7 +209,7 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
         self._run_in_parallel = run_in_parallel
         self._function_call_timeout_secs = function_call_timeout_secs
         self._filter_incomplete_user_turns: bool = False
-        self._start_callbacks = {}
+        self._base_system_instruction: Optional[str] = None
         self._adapter = self.adapter_class()
         self._functions: Dict[Optional[str], FunctionCallRegistryItem] = {}
         self._function_call_tasks: Dict[Optional[asyncio.Task], FunctionCallRunnerItem] = {}
@@ -243,7 +240,10 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
         return self.get_llm_adapter().create_llm_specific_message(message)
 
     async def run_inference(
-        self, context: LLMContext | OpenAILLMContext, max_tokens: Optional[int] = None
+        self,
+        context: LLMContext,
+        max_tokens: Optional[int] = None,
+        system_instruction: Optional[str] = None,
     ) -> Optional[str]:
         """Run a one-shot, out-of-band (i.e. out-of-pipeline) inference with the given LLM context.
 
@@ -253,46 +253,13 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
             context: The LLM context containing conversation history.
             max_tokens: Optional maximum number of tokens to generate. If provided,
                 overrides the service's default max_tokens/max_completion_tokens setting.
+            system_instruction: Optional system instruction to use for this inference.
+                If provided, overrides any system instruction in the context.
 
         Returns:
             The LLM's response as a string, or None if no response is generated.
         """
         raise NotImplementedError(f"run_inference() not supported by {self.__class__.__name__}")
-
-    def create_context_aggregator(
-        self,
-        context: OpenAILLMContext,
-        *,
-        user_params: LLMUserAggregatorParams = LLMUserAggregatorParams(),
-        assistant_params: LLMAssistantAggregatorParams = LLMAssistantAggregatorParams(),
-    ) -> Any:
-        """Create a context aggregator for managing LLM conversation context.
-
-        Must be implemented by subclasses.
-
-        Args:
-            context: The LLM context to create an aggregator for.
-            user_params: Parameters for user message aggregation.
-            assistant_params: Parameters for assistant message aggregation.
-
-        Returns:
-            A context aggregator instance.
-
-        .. deprecated:: 0.0.99
-            `create_context_aggregator()` is deprecated and will be removed in a future version.
-            Use the universal `LLMContext` and `LLMContextAggregatorPair` instead.
-            See `OpenAILLMContext` docstring for migration guide.
-        """
-        with warnings.catch_warnings():
-            warnings.simplefilter("always")
-            warnings.warn(
-                "create_context_aggregator() is deprecated and will be removed in a future version. "
-                "Use the universal LLMContext and LLMContextAggregatorPair directly instead. "
-                "See OpenAILLMContext docstring for migration guide.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        pass
 
     async def start(self, frame: StartFrame):
         """Start the LLM service.
@@ -326,6 +293,19 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
             await self._cancel_sequential_runner_task()
         await self._cancel_summary_task()
 
+    def _compose_system_instruction(self):
+        """Compose system_instruction by appending turn completion instructions.
+
+        Combines the base system instruction with turn completion instructions
+        and writes the result to ``self._settings.system_instruction``.
+        """
+        base = self._base_system_instruction
+        completion_instructions = self._user_turn_completion_config.completion_instructions
+        if base:
+            self._settings.system_instruction = f"{base}\n\n{completion_instructions}"
+        else:
+            self._settings.system_instruction = completion_instructions
+
     async def _update_settings(self, delta: LLMSettings) -> dict[str, Any]:
         """Apply a settings delta, handling turn-completion fields.
 
@@ -345,9 +325,28 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
                 f"{self}: Incomplete turn filtering "
                 f"{'enabled' if self._filter_incomplete_user_turns else 'disabled'}"
             )
+            if self._filter_incomplete_user_turns:
+                # Save the current system_instruction before composing
+                self._base_system_instruction = self._settings.system_instruction
+                self._compose_system_instruction()
+            else:
+                # Restore original system_instruction
+                self._settings.system_instruction = self._base_system_instruction
+                self._base_system_instruction = None
 
         if "user_turn_completion_config" in changed and self._filter_incomplete_user_turns:
             self.set_user_turn_completion_config(self._settings.user_turn_completion_config)
+            self._compose_system_instruction()
+
+        if (
+            "system_instruction" in changed
+            and self._filter_incomplete_user_turns
+            and "filter_incomplete_user_turns" not in changed
+        ):
+            # system_instruction changed while turn completion is active.
+            # Treat the new value as the new base and recompose.
+            self._base_system_instruction = self._settings.system_instruction
+            self._compose_system_instruction()
 
         return changed
 
@@ -365,7 +364,9 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
         elif isinstance(frame, LLMConfigureOutputFrame):
             self._skip_tts = frame.skip_tts
         elif isinstance(frame, LLMUpdateSettingsFrame):
-            if frame.delta is not None:
+            if frame.service is not None and frame.service is not self:
+                await self.push_frame(frame, direction)
+            elif frame.delta is not None:
                 await self._update_settings(frame.delta)
             elif frame.settings:
                 # Backward-compatible path: convert legacy dict to settings object.
@@ -502,23 +503,17 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
 
         # Create summary context
         transcript = LLMContextSummarizationUtil.format_messages_for_summary(result.messages)
-        prompt_messages = [
-            {
-                "role": "system",
-                "content": frame.summarization_prompt,
-            },
-            {
-                "role": "user",
-                "content": f"Conversation history:\n{transcript}",
-            },
-        ]
-        summary_context = LLMContext(messages=prompt_messages)
+        summary_context = LLMContext(
+            messages=[{"role": "user", "content": f"Conversation history:\n{transcript}"}]
+        )
 
         # Generate summary using run_inference
         # This will be overridden by each LLM service implementation
         try:
             summary_text = await self.run_inference(
-                summary_context, max_tokens=frame.target_context_tokens
+                summary_context,
+                max_tokens=frame.target_context_tokens,
+                system_instruction=frame.summarization_prompt,
             )
         except NotImplementedError:
             raise RuntimeError(
@@ -540,7 +535,6 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
         self,
         function_name: Optional[str],
         handler: Any,
-        start_callback=None,
         *,
         cancel_on_interruption: bool = True,
         timeout_secs: Optional[float] = None,
@@ -552,48 +546,20 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
                 all function calls with a catch-all handler.
             handler: The function handler. Should accept a single FunctionCallParams
                 parameter.
-            start_callback: Legacy callback function (deprecated). Put initialization
-                code at the top of your handler instead.
-
-                .. deprecated:: 0.0.59
-                    The `start_callback` parameter is deprecated and will be removed in a future version.
-
             cancel_on_interruption: Whether to cancel this function call when an
                 interruption occurs. Defaults to True.
             timeout_secs: Optional per-tool timeout in seconds. Overrides the global
                 ``function_call_timeout_secs`` for this specific function. Defaults to
                 None, which uses the global timeout.
         """
-        signature = inspect.signature(handler)
-        handler_deprecated = len(signature.parameters) > 1
-        if handler_deprecated:
-            with warnings.catch_warnings():
-                warnings.simplefilter("always")
-                warnings.warn(
-                    "Function calls with parameters `(function_name, tool_call_id, arguments, llm, context, result_callback)` are deprecated, use a single `FunctionCallParams` parameter instead.",
-                    DeprecationWarning,
-                )
-
         # Registering a function with the function_name set to None will run
         # that handler for all functions
         self._functions[function_name] = FunctionCallRegistryItem(
             function_name=function_name,
             handler=handler,
             cancel_on_interruption=cancel_on_interruption,
-            handler_deprecated=handler_deprecated,
             timeout_secs=timeout_secs,
         )
-
-        # Start callbacks are now deprecated.
-        if start_callback:
-            with warnings.catch_warnings():
-                warnings.simplefilter("always")
-                warnings.warn(
-                    "Parameter 'start_callback' is deprecated, just put your code on top of the actual function call instead.",
-                    DeprecationWarning,
-                )
-
-            self._start_callbacks[function_name] = start_callback
 
     def register_direct_function(
         self,
@@ -621,7 +587,6 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
             function_name=wrapper.name,
             handler=wrapper,
             cancel_on_interruption=cancel_on_interruption,
-            handler_deprecated=False,
             timeout_secs=timeout_secs,
         )
 
@@ -632,8 +597,6 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
             function_name: The name of the function handler to remove.
         """
         del self._functions[function_name]
-        if function_name in self._start_callbacks:
-            del self._start_callbacks[function_name]
 
     def unregister_direct_function(self, handler: Any):
         """Remove a registered direct function handler.
@@ -702,56 +665,6 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
         else:
             await self._run_sequential_function_calls(runner_items)
 
-    async def request_image_frame(
-        self,
-        user_id: str,
-        *,
-        function_name: Optional[str] = None,
-        tool_call_id: Optional[str] = None,
-        text_content: Optional[str] = None,
-        video_source: Optional[str] = None,
-        timeout: Optional[float] = 10.0,
-    ):
-        """Request an image from a user.
-
-        Pushes a UserImageRequestFrame upstream to request an image from the
-        specified user. The user image can then be processed by the LLM.
-
-        Use this function from a function call if you want the LLM to process
-        the image. If you expect the image to be processed by a vision service,
-        you might want to push a UserImageRequestFrame upstream directly.
-
-        .. deprecated:: 0.0.92
-            This method is deprecated, push a `UserImageRequestFrame` instead.
-
-        Args:
-            user_id: The ID of the user to request an image from.
-            function_name: Optional function name associated with the request.
-            tool_call_id: Optional tool call ID associated with the request.
-            text_content: Optional text content/context for the image request.
-            video_source: Optional video source identifier.
-            timeout: Optional timeout for the requested image to be added to the LLM context.
-
-        """
-        with warnings.catch_warnings():
-            warnings.simplefilter("always")
-            warnings.warn(
-                "Method `request_image_frame()` is deprecated, push a `UserImageRequestFrame` instead.",
-                DeprecationWarning,
-            )
-        await self.push_frame(
-            UserImageRequestFrame(
-                user_id=user_id,
-                text=text_content,
-                append_to_context=True,
-                function_name=function_name,
-                tool_call_id=tool_call_id,
-                # Deprecated fields below.
-                context=text_content,
-            ),
-            FrameDirection.UPSTREAM,
-        )
-
     async def _create_sequential_runner_task(self):
         if not self._sequential_runner_task:
             self._sequential_runner_queue = asyncio.Queue()
@@ -790,14 +703,6 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
         for runner_item in runner_items:
             await self._sequential_runner_queue.put(runner_item)
 
-    async def _call_start_function(
-        self, context: OpenAILLMContext | LLMContext, function_name: str
-    ):
-        if function_name in self._start_callbacks.keys():
-            await self._start_callbacks[function_name](function_name, self, context)
-        elif None in self._start_callbacks.keys():
-            return await self._start_callbacks[None](function_name, self, context)
-
     async def _run_function_call(self, runner_item: FunctionCallRunnerItem):
         if runner_item.function_name in self._functions.keys():
             item = self._functions[runner_item.function_name]
@@ -809,9 +714,6 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
         logger.debug(
             f"{self} Calling function [{runner_item.function_name}:{runner_item.tool_call_id}] with arguments {runner_item.arguments}"
         )
-
-        # NOTE(aleix): This needs to be removed after we remove the deprecation.
-        await self._call_start_function(runner_item.context, runner_item.function_name)
 
         # Broadcast function call in-progress. This frame will let our assistant
         # context aggregator know that we are in the middle of a function
@@ -850,11 +752,7 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
         # Start a timeout task for deferred function calls
         async def timeout_handler():
             try:
-                effective_timeout = (
-                    item.timeout_secs
-                    if item.timeout_secs is not None
-                    else self._function_call_timeout_secs
-                )
+                effective_timeout = item.timeout_secs or self._function_call_timeout_secs
                 await asyncio.sleep(effective_timeout)
                 logger.warning(
                     f"{self} Function call [{runner_item.function_name}:{runner_item.tool_call_id}] timed out after {effective_timeout} seconds."
@@ -865,13 +763,15 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
             except asyncio.CancelledError:
                 raise
 
-        timeout_task = self.create_task(timeout_handler())
+        if item.timeout_secs or self._function_call_timeout_secs:
+            timeout_task = self.create_task(timeout_handler())
+
+        # Yield to the event loop so the timeout task coroutine gets entered
+        # before it could be cancelled. Without this, cancelling the task before
+        # it starts would leave the coroutine in a "never awaited" state.
+        await asyncio.sleep(0)
 
         try:
-            # Yield to the event loop so the timeout task coroutine gets entered
-            # before it could be cancelled. Without this, cancelling the task before
-            # it starts would leave the coroutine in a "never awaited" state.
-            await asyncio.sleep(0)
             if isinstance(item.handler, DirectFunctionWrapper):
                 # Handler is a DirectFunctionWrapper
                 await item.handler.invoke(
@@ -887,25 +787,15 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
                 )
             else:
                 # Handler is a FunctionCallHandler
-                if item.handler_deprecated:
-                    await item.handler(
-                        runner_item.function_name,
-                        runner_item.tool_call_id,
-                        runner_item.arguments,
-                        self,
-                        runner_item.context,
-                        function_call_result_callback,
-                    )
-                else:
-                    params = FunctionCallParams(
-                        function_name=runner_item.function_name,
-                        tool_call_id=runner_item.tool_call_id,
-                        arguments=runner_item.arguments,
-                        llm=self,
-                        context=runner_item.context,
-                        result_callback=function_call_result_callback,
-                    )
-                    await item.handler(params)
+                params = FunctionCallParams(
+                    function_name=runner_item.function_name,
+                    tool_call_id=runner_item.tool_call_id,
+                    arguments=runner_item.arguments,
+                    llm=self,
+                    context=runner_item.context,
+                    result_callback=function_call_result_callback,
+                )
+                await item.handler(params)
         except Exception as e:
             error_message = f"Error executing function call [{runner_item.function_name}]: {e}"
             logger.error(f"{self} {error_message}")
@@ -944,3 +834,190 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
     def _function_call_task_finished(self, task: asyncio.Task):
         if task in self._function_call_tasks:
             del self._function_call_tasks[task]
+
+
+# ---------------------------------------------------------------------------
+# WebSocket LLM service base
+# ---------------------------------------------------------------------------
+
+
+class WebsocketReconnectedError(Exception):
+    """Raised by ``_ws_send``/``_ws_recv`` after a transparent reconnection.
+
+    Signals that the WebSocket connection was lost and automatically
+    re-established.  The current inference should be restarted — any
+    connection-local state on the server (e.g. cached responses) is gone.
+    """
+
+    pass
+
+
+class WebsocketLLMService(LLMService, WebsocketService):
+    """Base class for websocket-based LLM services.
+
+    Each LLM inference is a discrete request/response exchange: send one
+    request, receive events inline until a terminal event, then wait for
+    the next frame to trigger an inference.  This contrasts with
+    ``WebsocketTTSService`` / ``WebsocketSTTService`` which stream data
+    continuously via a background receive loop
+    (``_receive_task_handler``).  This class does **not** start a
+    background receive loop.
+
+    Provides connection lifecycle management (connect on start, disconnect
+    on stop/cancel), automatic reconnection with exponential backoff, and
+    three helpers for running each inference:
+
+    1. ``_ensure_connected()`` — verify the websocket is alive, reconnect
+       with exponential backoff if not.
+    2. ``_ws_send(message)`` — send the inference request as JSON.
+    3. ``_ws_recv()`` — receive and parse response events one at a time
+       until the caller sees a terminal event.
+
+    ``_ws_send`` and ``_ws_recv`` catch ``ConnectionClosed`` transparently,
+    auto-reconnect via ``_try_reconnect``, and raise
+    ``WebsocketReconnectedError`` so callers know the inference must be
+    restarted.  If reconnection fails, the original ``ConnectionClosed``
+    propagates.
+
+    Subclasses must implement:
+        ``_connect_websocket()``: Establish the websocket connection.
+        ``_disconnect_websocket()``: Close the websocket and clean up.
+
+    Event handlers:
+        on_connection_error: Called when a websocket connection error occurs.
+
+    Example::
+
+        @llm.event_handler("on_connection_error")
+        async def on_connection_error(llm: LLMService, error: str):
+            logger.error(f"LLM connection error: {error}")
+    """
+
+    def __init__(self, *, reconnect_on_error: bool = True, **kwargs):
+        """Initialize the Websocket LLM service.
+
+        Args:
+            reconnect_on_error: Whether to automatically reconnect on websocket errors.
+            **kwargs: Additional arguments passed to parent classes.
+        """
+        LLMService.__init__(self, **kwargs)
+        WebsocketService.__init__(self, reconnect_on_error=reconnect_on_error, **kwargs)
+        self._register_event_handler("on_connection_error")
+
+    # -- lifecycle ------------------------------------------------------------
+
+    async def _connect(self):
+        """Connect: reset flags and establish the websocket."""
+        await super()._connect()
+        await self._connect_websocket()
+
+    async def _disconnect(self):
+        """Disconnect: set flags and close the websocket."""
+        await super()._disconnect()
+        await self._disconnect_websocket()
+
+    async def start(self, frame: StartFrame):
+        """Start the service and establish WebSocket connection.
+
+        Args:
+            frame: The start frame triggering service initialization.
+        """
+        await super().start(frame)
+        await self._connect()
+
+    async def stop(self, frame: EndFrame):
+        """Stop the service and close WebSocket connection.
+
+        Args:
+            frame: The end frame triggering service shutdown.
+        """
+        await super().stop(frame)
+        await self._disconnect()
+
+    async def cancel(self, frame: CancelFrame):
+        """Cancel the service and close WebSocket connection.
+
+        Args:
+            frame: The cancel frame triggering service cancellation.
+        """
+        await super().cancel(frame)
+        await self._disconnect()
+
+    # -- per-inference helpers ------------------------------------------------
+
+    async def _ws_send(self, message: dict):
+        """Send a JSON message over the websocket.
+
+        Guards against sends during intentional disconnect.  If the send
+        fails with ``ConnectionClosed``, attempts to reconnect and raises
+        ``WebsocketReconnectedError`` on success so the caller can restart
+        the inference.  If reconnection fails, the original
+        ``ConnectionClosed`` propagates.
+
+        Args:
+            message: The message dict to serialize and send.
+        """
+        if self._disconnecting or not self._websocket:
+            return
+        try:
+            await self._websocket.send(json.dumps(message))
+        except ConnectionClosed:
+            if self._disconnecting:
+                return
+            success = await self._try_reconnect(report_error=self._report_error)
+            if success:
+                raise WebsocketReconnectedError()
+            raise
+
+    async def _ws_recv(self) -> dict:
+        """Receive and parse a JSON message from the websocket.
+
+        If the receive fails with ``ConnectionClosed``, attempts to
+        reconnect and raises ``WebsocketReconnectedError`` on success.
+        If reconnection fails, the original ``ConnectionClosed``
+        propagates.
+
+        Returns:
+            The parsed JSON message as a dict.
+        """
+        try:
+            raw = await self._websocket.recv()
+            return json.loads(raw)
+        except ConnectionClosed:
+            if self._disconnecting:
+                raise
+            success = await self._try_reconnect(report_error=self._report_error)
+            if success:
+                raise WebsocketReconnectedError()
+            raise
+
+    async def _ensure_connected(self):
+        """Ensure the websocket is connected, reconnecting if needed.
+
+        Uses ``_try_reconnect`` with exponential backoff.
+
+        Raises:
+            ConnectionError: If the connection could not be established.
+        """
+        if self._websocket and self._websocket.state is not State.CLOSED:
+            return
+        success = await self._try_reconnect(report_error=self._report_error)
+        if not success:
+            raise ConnectionError(f"{self} failed to establish WebSocket connection")
+
+    # -- WebsocketService interface -------------------------------------------
+
+    async def _receive_messages(self):
+        """Not used — messages are received inline during each inference.
+
+        This satisfies the ``WebsocketService`` abstract method but is never
+        called because ``_receive_task_handler`` is never started.
+        """
+        raise NotImplementedError(
+            "WebsocketLLMService receives messages inline during inference, "
+            "not via a continuous background loop"
+        )
+
+    async def _report_error(self, error: ErrorFrame):
+        await self._call_event_handler("on_connection_error", error.error)
+        await self.push_error_frame(error)

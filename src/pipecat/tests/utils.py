@@ -127,6 +127,7 @@ async def run_test(
     expected_down_frames: Optional[Sequence[type]] = None,
     expected_up_frames: Optional[Sequence[type]] = None,
     frames_to_send: Sequence[Frame],
+    frames_to_send_direction: FrameDirection = FrameDirection.DOWNSTREAM,
     ignore_start: bool = True,
     observers: Optional[List[BaseObserver]] = None,
     pipeline_params: Optional[PipelineParams] = None,
@@ -144,6 +145,9 @@ async def run_test(
         expected_down_frames: Expected frame types flowing downstream (optional).
         expected_up_frames: Expected frame types flowing upstream (optional).
         frames_to_send: Sequence of frames to send through the processor.
+        frames_to_send_direction: Direction to send frames_to_send. Downstream
+            frames are pushed from the beginning of the pipeline, upstream frames
+            from the end. Defaults to DOWNSTREAM.
         ignore_start: Whether to ignore StartFrames in frame validation.
         observers: Optional list of observers to attach to the pipeline.
         pipeline_params: Optional pipeline parameters.
@@ -188,7 +192,7 @@ async def run_test(
             if isinstance(frame, SleepFrame):
                 await asyncio.sleep(frame.sleep)
             else:
-                await task.queue_frame(frame)
+                await task.queue_frame(frame, frames_to_send_direction)
 
         if send_end_frame:
             await task.queue_frame(EndFrame())
@@ -199,13 +203,13 @@ async def run_test(
     #
     # Down frames
     #
-    received_down_frames: Sequence[Frame] = []
-    if expected_down_frames is not None:
-        while not received_down.empty():
-            frame = await received_down.get()
-            if not isinstance(frame, EndFrame) or not send_end_frame:
-                received_down_frames.append(frame)
+    received_down_frames: list[Frame] = []
+    while not received_down.empty():
+        frame = await received_down.get()
+        if not isinstance(frame, EndFrame) or not send_end_frame:
+            received_down_frames.append(frame)
 
+    if expected_down_frames is not None:
         down_frames_printed = "["
         for frame in received_down_frames:
             down_frames_printed += f"{frame.__class__.__name__}, "
@@ -225,12 +229,12 @@ async def run_test(
     #
     # Up frames
     #
-    received_up_frames: Sequence[Frame] = []
-    if expected_up_frames is not None:
-        while not received_up.empty():
-            frame = await received_up.get()
-            received_up_frames.append(frame)
+    received_up_frames: list[Frame] = []
+    while not received_up.empty():
+        frame = await received_up.get()
+        received_up_frames.append(frame)
 
+    if expected_up_frames is not None:
         print("received UP frames =", received_up_frames)
         print("expected UP frames =", expected_up_frames)
 

@@ -23,14 +23,12 @@ from typing import (
     Coroutine,
     List,
     Optional,
-    Sequence,
     Tuple,
     Type,
 )
 
 from loguru import logger
 
-from pipecat.audio.interruptions.base_interruption_strategy import BaseInterruptionStrategy
 from pipecat.clocks.base_clock import BaseClock
 from pipecat.frames.frames import (
     CancelFrame,
@@ -193,10 +191,6 @@ class FrameProcessor(BaseObject):
         self._enable_metrics = False
         self._enable_usage_metrics = False
         self._report_only_initial_ttfb = False
-        # Other properties (deprecated)
-        self._allow_interruptions = False
-        self._interruption_strategies: List[BaseInterruptionStrategy] = []
-        self._deprecated_openaillmcontext = False
 
         # Indicates whether we have received the StartFrame.
         self.__started = False
@@ -309,29 +303,6 @@ class FrameProcessor(BaseObject):
         return self._prev
 
     @property
-    def interruptions_allowed(self):
-        """Check if interruptions are allowed for this processor.
-
-        .. deprecated:: 0.0.99
-            Use  `LLMUserAggregator`'s new `user_mute_strategies` parameter instead.
-
-        Returns:
-            True if interruptions are allowed.
-        """
-        import warnings
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("always")
-            warnings.warn(
-                "`FrameProcessor.interruptions_allowed` is deprecated. "
-                "Use `LLMUserAggregator`'s new `user_mute_strategies` parameter instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
-        return self._allow_interruptions
-
-    @property
     def metrics_enabled(self):
         """Check if metrics collection is enabled.
 
@@ -357,19 +328,6 @@ class FrameProcessor(BaseObject):
             True if only initial time-to-first-byte should be reported.
         """
         return self._report_only_initial_ttfb
-
-    @property
-    def interruption_strategies(self) -> Sequence[BaseInterruptionStrategy]:
-        """Get the interruption strategies for this processor.
-
-        .. deprecated:: 0.0.99
-            This function is deprecated, use the new user and bot turn start
-            strategies insted.
-
-        Returns:
-            Sequence of interruption strategies.
-        """
-        return self._interruption_strategies
 
     @property
     def task_manager(self) -> BaseTaskManager:
@@ -526,33 +484,6 @@ class FrameProcessor(BaseObject):
             timeout: Optional timeout for task cancellation.
         """
         await self.task_manager.cancel_task(task, timeout)
-
-    async def wait_for_task(self, task: asyncio.Task, timeout: Optional[float] = None):
-        """Wait for a task to complete.
-
-        .. deprecated:: 0.0.81
-            This function is deprecated, use `await task` or
-            `await asyncio.wait_for(task, timeout)` instead.
-
-        Args:
-            task: The task to wait for.
-            timeout: Optional timeout for waiting.
-        """
-        import warnings
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("always")
-            warnings.warn(
-                "`FrameProcessor.wait_for_task()` is deprecated. "
-                "Use `await task` or `await asyncio.wait_for(task, timeout)` instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
-        if timeout:
-            await asyncio.wait_for(task, timeout)
-        else:
-            await task
 
     async def setup(self, setup: FrameProcessorSetup):
         """Set up the processor with required components.
@@ -847,14 +778,9 @@ class FrameProcessor(BaseObject):
             frame: The start frame containing initialization parameters.
         """
         self.__started = True
-        self._allow_interruptions = frame.allow_interruptions
         self._enable_metrics = frame.enable_metrics
         self._enable_usage_metrics = frame.enable_usage_metrics
-        self._interruption_strategies = frame.interruption_strategies
         self._report_only_initial_ttfb = frame.report_only_initial_ttfb
-
-        # NOTE(aleix): Remove when OpenAILLMContext/LLMUserContextAggregator is removed.
-        self._deprecated_openaillmcontext = "deprecated_openaillmcontext" in frame.metadata
 
         self.__create_process_task()
 

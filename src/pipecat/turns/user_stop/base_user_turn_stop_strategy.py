@@ -11,6 +11,7 @@ from typing import Optional, Type
 
 from pipecat.frames.frames import Frame
 from pipecat.processors.frame_processor import FrameDirection
+from pipecat.turns.types import ProcessFrameResult
 from pipecat.utils.asyncio.task_manager import BaseTaskManager
 from pipecat.utils.base_object import BaseObject
 
@@ -23,7 +24,7 @@ class UserTurnStoppedParams:
     contextual information about how the end of user turn should be handled by
     the user aggregator.
 
-    Attributes:
+    Parameters:
         enable_user_speaking_frames: Whether the user aggregator should emit
             frames indicating user speaking state (e.g., user stopped speaking).
             This is typically enabled by default, but may be disabled when another
@@ -89,7 +90,7 @@ class BaseUserTurnStopStrategy(BaseObject):
         """Reset the strategy to its initial state."""
         pass
 
-    async def process_frame(self, frame: Frame):
+    async def process_frame(self, frame: Frame) -> ProcessFrameResult:
         """Process an incoming frame to decide whether the user stopped speaking.
 
         Subclasses should override this to implement logic that decides whether
@@ -97,6 +98,10 @@ class BaseUserTurnStopStrategy(BaseObject):
 
         Args:
             frame: The frame to be analyzed.
+
+        Returns:
+            A ProcessFrameResult indicating the outcome. Subclasses that return
+            None are treated as CONTINUE for backward compatibility.
         """
         pass
 

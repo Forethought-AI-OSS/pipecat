@@ -46,15 +46,6 @@ from pipecat.frames.frames import (
     VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.aggregators.llm_context import LLMContext
-from pipecat.processors.aggregators.llm_response import (
-    LLMAssistantAggregatorParams,
-    LLMUserAggregatorParams,
-)
-from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
-from pipecat.processors.aggregators.openai_llm_context import (
-    OpenAILLMContext,
-    OpenAILLMContextFrame,
-)
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.llm_service import FunctionCallFromLLM, LLMService
 from pipecat.services.settings import NOT_GIVEN, LLMSettings, _NotGiven
@@ -166,38 +157,51 @@ class UltravoxRealtimeLLMService(LLMService):
     by the model and may not always align with its understanding of user input.
     """
 
-    _settings: UltravoxRealtimeLLMSettings
+    Settings = UltravoxRealtimeLLMSettings
+    _settings: Settings
 
     def __init__(
         self,
         *,
         params: Union[AgentInputParams, OneShotInputParams, JoinUrlInputParams],
+        settings: Optional[Settings] = None,
         one_shot_selected_tools: Optional[ToolsSchema] = None,
         **kwargs,
     ):
         """Initialize the Ultravox Realtime LLM service.
 
         Args:
-            api_key: Ultravox API key for authentication.
             params: Configuration parameters for the model.
+            settings: Ultravox Realtime LLM settings. If provided, the ``settings``
+                values take precedence over default values.
             one_shot_selected_tools: ToolsSchema for tools to use with this call.
                 May only be set with OneShotInputParams.
             **kwargs: Additional arguments passed to parent LLMService.
         """
+        # 1. Initialize default_settings with hardcoded defaults
+        default_settings = self.Settings(
+            model=None,
+            system_instruction=None,
+            temperature=None,
+            max_tokens=None,
+            top_p=None,
+            top_k=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+            seed=None,
+            filter_incomplete_user_turns=False,
+            user_turn_completion_config=None,
+            output_medium=None,
+        )
+
+        # (No step 2/3 — params is required and not deprecated)
+
+        # 4. Apply settings delta (canonical API, always wins)
+        if settings is not None:
+            default_settings.apply_update(settings)
+
         super().__init__(
-            settings=UltravoxRealtimeLLMSettings(
-                model=None,
-                temperature=None,
-                max_tokens=None,
-                top_p=None,
-                top_k=None,
-                frequency_penalty=None,
-                presence_penalty=None,
-                seed=None,
-                filter_incomplete_user_turns=False,
-                user_turn_completion_config=None,
-                output_medium=None,
-            ),
+            settings=default_settings,
             **kwargs,
         )
         self._params = params
@@ -370,7 +374,7 @@ class UltravoxRealtimeLLMService(LLMService):
             await self.cancel_task(self._receive_task, timeout=1.0)
             self._receive_task = None
 
-    async def _update_settings(self, delta: UltravoxRealtimeLLMSettings):
+    async def _update_settings(self, delta: Settings):
         changed = await super()._update_settings(delta)
         if "output_medium" in changed:
             await self._update_output_medium(self._settings.output_medium)
@@ -391,13 +395,8 @@ class UltravoxRealtimeLLMService(LLMService):
         """
         await super().process_frame(frame, direction)
 
-        if isinstance(frame, (LLMContextFrame, OpenAILLMContextFrame)):
-            context = (
-                frame.context
-                if isinstance(frame, LLMContextFrame)
-                else LLMContext.from_openai_context(frame.context)
-            )
-            await self._handle_context(context)
+        if isinstance(frame, LLMContextFrame):
+            await self._handle_context(frame.context)
         elif isinstance(frame, InterruptionFrame):
             await self.stop_all_metrics()
             await self.push_frame(frame, direction)
@@ -616,40 +615,3 @@ class UltravoxRealtimeLLMService(LLMService):
                     await self.push_frame(LLMFullResponseStartFrame())
                     self._bot_responding = "text"
                 await self.push_frame(LLMTextFrame(text=text or delta))
-
-    def create_context_aggregator(
-        self,
-        context: OpenAILLMContext,
-        *,
-        user_params: LLMUserAggregatorParams = LLMUserAggregatorParams(),
-        assistant_params: LLMAssistantAggregatorParams = LLMAssistantAggregatorParams(),
-    ) -> LLMContextAggregatorPair:
-        """Create an instance of LLMContextAggregatorPair from an OpenAILLMContext.
-
-        Constructor keyword arguments for both the user and assistant aggregators can be provided.
-
-        NOTE: this method exists only for backward compatibility. New code
-        should instead do::
-
-            context = LLMContext(...)
-            context_aggregator = LLMContextAggregatorPair(context)
-
-        Args:
-            context: The LLM context to use.
-            user_params: User aggregator parameters. Defaults to LLMUserAggregatorParams().
-            assistant_params: Assistant aggregator parameters. Defaults to LLMAssistantAggregatorParams().
-
-        Returns:
-            A pair of user and assistant context aggregators.
-
-        .. deprecated:: 0.0.99
-            `create_context_aggregator()` is deprecated and will be removed in a future version.
-            Use the universal `LLMContext` and `LLMContextAggregatorPair` instead.
-            See `OpenAILLMContext` docstring for migration guide.
-        """
-        # from_openai_context handles deprecation warning
-        context = LLMContext.from_openai_context(context)
-        assistant_params.expect_stripped_words = False
-        return LLMContextAggregatorPair(
-            context, user_params=user_params, assistant_params=assistant_params
-        )

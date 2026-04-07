@@ -20,7 +20,6 @@ from typing import Any, AsyncIterable, Dict, Iterable, List, Optional, Set, Tupl
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
-from pipecat.audio.interruptions.base_interruption_strategy import BaseInterruptionStrategy
 from pipecat.clocks.base_clock import BaseClock
 from pipecat.clocks.system_clock import SystemClock
 from pipecat.frames.frames import (
@@ -48,7 +47,6 @@ from pipecat.pipeline.base_pipeline import BasePipeline
 from pipecat.pipeline.base_task import BasePipelineTask, PipelineTaskParams
 from pipecat.pipeline.pipeline import Pipeline, PipelineSink, PipelineSource
 from pipecat.pipeline.task_observer import TaskObserver
-from pipecat.processors.aggregators.llm_response import LLMUserContextAggregator
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor, FrameProcessorSetup
 from pipecat.processors.frameworks.rtvi import RTVIObserver, RTVIObserverParams, RTVIProcessor
 from pipecat.utils.asyncio.task_manager import BaseTaskManager, TaskManager, TaskManagerParams
@@ -57,7 +55,7 @@ from pipecat.utils.tracing.tracing_context import TracingContext
 from pipecat.utils.tracing.turn_trace_observer import TurnTraceObserver
 
 HEARTBEAT_SECS = 1.0
-HEARTBEAT_MONITOR_SECS = HEARTBEAT_SECS * 10
+HEARTBEAT_MONITOR_SECS = 10.0
 
 IDLE_TIMEOUT_SECS = 300
 
@@ -112,27 +110,14 @@ class PipelineParams(BaseModel):
     constructor arguments instead.
 
     Parameters:
-        allow_interruptions: Whether to allow pipeline interruptions.
-
-            .. deprecated:: 0.0.99
-                Use  `LLMUserAggregator`'s new `user_turn_strategies` parameter instead.
-
         audio_in_sample_rate: Input audio sample rate in Hz.
         audio_out_sample_rate: Output audio sample rate in Hz.
         enable_heartbeats: Whether to enable heartbeat monitoring.
         enable_metrics: Whether to enable metrics collection.
         enable_usage_metrics: Whether to enable usage metrics.
         heartbeats_period_secs: Period between heartbeats in seconds.
-        interruption_strategies: [deprecated] Strategies for bot interruption behavior.
-
-            .. deprecated:: 0.0.99
-                Use  `LLMUserAggregator`'s new `user_turn_strategies` parameter instead.
-
-        observers: [deprecated] Use `observers` arg in `PipelineTask` class.
-
-            .. deprecated:: 0.0.58
-                Use the `observers` argument in the `PipelineTask` class instead.
-
+        heartbeats_monitor_secs: Timeout (in seconds) before warning about
+            missed heartbeats. Defaults to 10 seconds.
         report_only_initial_ttfb: Whether to report only initial time to first byte.
         send_initial_empty_metrics: Whether to send initial empty metrics.
         start_metadata: Additional metadata for pipeline start.
@@ -140,15 +125,13 @@ class PipelineParams(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    allow_interruptions: bool = True
     audio_in_sample_rate: int = 16000
     audio_out_sample_rate: int = 24000
     enable_heartbeats: bool = False
     enable_metrics: bool = False
     enable_usage_metrics: bool = False
     heartbeats_period_secs: float = HEARTBEAT_SECS
-    interruption_strategies: List[BaseInterruptionStrategy] = Field(default_factory=list)
-    observers: List[BaseObserver] = Field(default_factory=list)
+    heartbeats_monitor_secs: float = HEARTBEAT_MONITOR_SECS
     report_only_initial_ttfb: bool = False
     send_initial_empty_metrics: bool = True
     start_metadata: Dict[str, Any] = Field(default_factory=dict)
@@ -168,21 +151,6 @@ class PipelineTask(BasePipelineTask):
     - on_frame_reached_downstream: Called when downstream frames reach the sink
     - on_idle_timeout: Called when pipeline is idle beyond timeout threshold
     - on_pipeline_started: Called when pipeline starts with StartFrame
-    - on_pipeline_stopped: [deprecated] Called when pipeline stops with StopFrame
-
-            .. deprecated:: 0.0.86
-                Use `on_pipeline_finished` instead.
-
-    - on_pipeline_ended: [deprecated] Called when pipeline ends with EndFrame
-
-            .. deprecated:: 0.0.86
-                Use `on_pipeline_finished` instead.
-
-    - on_pipeline_cancelled: [deprecated] Called when pipeline is cancelled with CancelFrame
-
-            .. deprecated:: 0.0.86
-                Use `on_pipeline_finished` instead.
-
     - on_pipeline_finished: Called after the pipeline has reached any terminal state.
           This includes:
 
@@ -277,16 +245,6 @@ class PipelineTask(BasePipelineTask):
         self._enable_tracing = enable_tracing and is_tracing_available()
         self._enable_turn_tracking = enable_turn_tracking
         self._idle_timeout_secs = idle_timeout_secs
-        if self._params.observers:
-            import warnings
-
-            with warnings.catch_warnings():
-                warnings.simplefilter("always")
-                warnings.warn(
-                    "Field 'observers' is deprecated, use the 'observers' parameter instead.",
-                    DeprecationWarning,
-                )
-            observers = self._params.observers
         observers = observers or []
         self._turn_tracking_observer: Optional[TurnTrackingObserver] = None
         self._user_bot_latency_observer: Optional[UserBotLatencyObserver] = None
@@ -413,9 +371,6 @@ class PipelineTask(BasePipelineTask):
         self._register_event_handler("on_frame_reached_downstream")
         self._register_event_handler("on_idle_timeout")
         self._register_event_handler("on_pipeline_started")
-        self._register_event_handler("on_pipeline_stopped")
-        self._register_event_handler("on_pipeline_ended")
-        self._register_event_handler("on_pipeline_cancelled")
         self._register_event_handler("on_pipeline_finished")
         self._register_event_handler("on_pipeline_error")
 
@@ -485,27 +440,6 @@ class PipelineTask(BasePipelineTask):
             Tuple of frame types that trigger the on_frame_reached_downstream event.
         """
         return tuple(self._reached_downstream_types)
-
-    def event_handler(self, event_name: str):
-        """Decorator for registering event handlers.
-
-        Args:
-            event_name: The name of the event to handle.
-
-        Returns:
-            The decorator function that registers the handler.
-        """
-        if event_name in ["on_pipeline_stopped", "on_pipeline_ended", "on_pipeline_cancelled"]:
-            import warnings
-
-            with warnings.catch_warnings():
-                warnings.simplefilter("always")
-                warnings.warn(
-                    f"Event '{event_name}' is deprecated, use 'on_pipeline_finished' instead.",
-                    DeprecationWarning,
-                )
-
-        return super().event_handler(event_name)
 
     def add_observer(self, observer: BaseObserver):
         """Add an observer to monitor pipeline execution.
@@ -761,7 +695,6 @@ class PipelineTask(BasePipelineTask):
                     f"{self}: timeout waiting for {frame} to reach the end of the pipeline (being blocked somewhere?)."
                 )
             finally:
-                await self._call_event_handler("on_pipeline_cancelled", frame)
                 await self._call_event_handler("on_pipeline_finished", frame)
 
         logger.debug(f"{self}: Closing. Waiting for {frame} to reach the end of the pipeline...")
@@ -832,14 +765,12 @@ class PipelineTask(BasePipelineTask):
         self._maybe_start_idle_task()
 
         start_frame = StartFrame(
-            allow_interruptions=self._params.allow_interruptions,
             audio_in_sample_rate=self._params.audio_in_sample_rate,
             audio_out_sample_rate=self._params.audio_out_sample_rate,
             enable_metrics=self._params.enable_metrics,
             enable_tracing=self._enable_tracing,
             enable_usage_metrics=self._params.enable_usage_metrics,
             report_only_initial_ttfb=self._params.report_only_initial_ttfb,
-            interruption_strategies=self._params.interruption_strategies,
             tracing_context=self._tracing_context,
         )
         start_frame.metadata = self._create_start_metadata()
@@ -876,22 +807,22 @@ class PipelineTask(BasePipelineTask):
 
         if isinstance(frame, EndTaskFrame):
             # Tell the task we should end nicely.
-            logger.debug(f"{self}: received end task frame {frame}")
+            logger.debug(f"{self}: received end task frame upstream {frame}")
             await self.queue_frame(EndFrame(reason=frame.reason))
         elif isinstance(frame, CancelTaskFrame):
             # Tell the task we should end right away.
-            logger.debug(f"{self}: received cancel task frame {frame}")
+            logger.debug(f"{self}: received cancel task frame upstream {frame}")
             await self.queue_frame(CancelFrame(reason=frame.reason))
         elif isinstance(frame, StopTaskFrame):
             # Tell the task we should stop nicely.
-            logger.debug(f"{self}: received stop task frame {frame}")
+            logger.debug(f"{self}: received stop task frame upstream {frame}")
             await self.queue_frame(StopFrame())
         elif isinstance(frame, InterruptionTaskFrame):
             # Tell the task we should interrupt the pipeline. Note that we are
             # bypassing the push queue and directly queue into the
             # pipeline. This is in case the push task is blocked waiting for a
             # pipeline-ending frame to finish traversing the pipeline.
-            logger.debug(f"{self}: received interruption task frame {frame}")
+            logger.debug(f"{self}: received interruption task frame upstream {frame}")
             await self._pipeline.queue_frame(InterruptionFrame())
         elif isinstance(frame, ErrorFrame):
             await self._call_event_handler("on_pipeline_error", frame)
@@ -923,17 +854,27 @@ class PipelineTask(BasePipelineTask):
 
             self._pipeline_start_event.set()
         elif isinstance(frame, EndFrame):
-            await self._call_event_handler("on_pipeline_ended", frame)
             await self._call_event_handler("on_pipeline_finished", frame)
             self._pipeline_end_event.set()
         elif isinstance(frame, StopFrame):
-            await self._call_event_handler("on_pipeline_stopped", frame)
             await self._call_event_handler("on_pipeline_finished", frame)
             self._pipeline_end_event.set()
         elif isinstance(frame, CancelFrame):
             self._pipeline_end_event.set()
         elif isinstance(frame, HeartbeatFrame):
             await self._heartbeat_queue.put(frame)
+        elif isinstance(frame, EndTaskFrame):
+            logger.debug(f"{self}: received end task frame downstream {frame}")
+            await self.queue_frame(EndTaskFrame(reason=frame.reason), FrameDirection.UPSTREAM)
+        elif isinstance(frame, StopTaskFrame):
+            logger.debug(f"{self}: received stop task frame downstream {frame}")
+            await self.queue_frame(StopTaskFrame(), FrameDirection.UPSTREAM)
+        elif isinstance(frame, CancelTaskFrame):
+            logger.debug(f"{self}: received cancel task frame downstream {frame}")
+            await self.queue_frame(CancelTaskFrame(reason=frame.reason), FrameDirection.UPSTREAM)
+        elif isinstance(frame, InterruptionTaskFrame):
+            logger.debug(f"{self}: received interruption task frame downstream {frame}")
+            await self.queue_frame(InterruptionTaskFrame(), FrameDirection.UPSTREAM)
 
     async def _heartbeat_push_handler(self):
         """Push heartbeat frames at regular intervals."""
@@ -952,7 +893,7 @@ class PipelineTask(BasePipelineTask):
         the time that a heartbeat frame takes to processes, that is how long it
         takes for the heartbeat frame to traverse all the pipeline.
         """
-        wait_time = HEARTBEAT_MONITOR_SECS
+        wait_time = self._params.heartbeats_monitor_secs
         while True:
             try:
                 frame = await asyncio.wait_for(self._heartbeat_queue.get(), timeout=wait_time)
@@ -1070,10 +1011,6 @@ class PipelineTask(BasePipelineTask):
     def _create_start_metadata(self) -> Dict[str, Any]:
         """Build and return start metadata including user-provided values."""
         start_metadata = {}
-
-        # NOTE(aleix): Remove when OpenAILLMContext/LLMUserContextAggregator is removed.
-        if self._find_processor(self._pipeline, LLMUserContextAggregator):
-            start_metadata["deprecated_openaillmcontext"] = True
 
         # Update with user provided metadata.
         start_metadata.update(self._params.start_metadata)
