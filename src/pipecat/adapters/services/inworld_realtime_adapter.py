@@ -4,7 +4,11 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
-"""OpenAI Realtime LLM adapter for Pipecat."""
+"""Inworld Realtime LLM adapter for Pipecat.
+
+Converts Pipecat's tool schemas and context into the format required by
+Inworld's Realtime API.
+"""
 
 import copy
 import json
@@ -15,15 +19,18 @@ from loguru import logger
 
 from pipecat.adapters.base_llm_adapter import BaseLLMAdapter
 from pipecat.adapters.schemas.function_schema import FunctionSchema
-from pipecat.adapters.schemas.tools_schema import AdapterType, ToolsSchema
+from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.processors.aggregators.llm_context import LLMContext, LLMContextMessage
-from pipecat.services.openai.realtime import events
+from pipecat.services.inworld.realtime import events
 
 
-class OpenAIRealtimeLLMInvocationParams(TypedDict):
-    """Context-based parameters for invoking OpenAI Realtime API.
+class InworldRealtimeLLMInvocationParams(TypedDict):
+    """Context-based parameters for invoking Inworld Realtime API.
 
-    This is a placeholder until support for universal LLMContext machinery is added for OpenAI Realtime.
+    Attributes:
+        system_instruction: System prompt/instructions for the session.
+        messages: List of conversation items formatted for Inworld Realtime.
+        tools: List of tool definitions.
     """
 
     system_instruction: Optional[str]
@@ -31,29 +38,29 @@ class OpenAIRealtimeLLMInvocationParams(TypedDict):
     tools: List[Dict[str, Any]]
 
 
-class OpenAIRealtimeLLMAdapter(BaseLLMAdapter):
-    """LLM adapter for OpenAI Realtime API function calling.
+class InworldRealtimeLLMAdapter(BaseLLMAdapter):
+    """LLM adapter for Inworld Realtime API.
 
-    Converts Pipecat's tool schemas into the specific format required by
-    OpenAI's Realtime API for function calling capabilities.
+    Converts Pipecat's universal context and tool schemas into the specific
+    format required by Inworld's Realtime API.
     """
 
     @property
     def id_for_llm_specific_messages(self) -> str:
-        """Get the identifier used in LLMSpecificMessage instances for OpenAI Realtime."""
-        return "openai-realtime"
+        """Get the identifier used in LLMSpecificMessage instances for Inworld Realtime."""
+        return "inworld-realtime"
 
     def get_llm_invocation_params(
         self, context: LLMContext, *, system_instruction: Optional[str] = None
-    ) -> OpenAIRealtimeLLMInvocationParams:
-        """Get OpenAI Realtime-specific LLM invocation parameters from a universal LLM context.
+    ) -> InworldRealtimeLLMInvocationParams:
+        """Get Inworld Realtime-specific LLM invocation parameters from a universal LLM context.
 
         Args:
             context: The LLM context containing messages, tools, etc.
             system_instruction: Optional system instruction from service settings.
 
         Returns:
-            Dictionary of parameters for invoking OpenAI Realtime's API.
+            Dictionary of parameters for invoking Inworld's Realtime API.
         """
         messages = self._from_universal_context_messages(self.get_messages(context))
         effective_system = self._resolve_system_instruction(
@@ -64,46 +71,36 @@ class OpenAIRealtimeLLMAdapter(BaseLLMAdapter):
         return {
             "system_instruction": effective_system,
             "messages": messages.messages,
-            # NOTE: LLMContext's tools are guaranteed to be a ToolsSchema (or NOT_GIVEN)
             "tools": self.from_standard_tools(context.tools) or [],
         }
 
     def get_messages_for_logging(self, context) -> List[Dict[str, Any]]:
-        """Get messages from a universal LLM context in a format ready for logging about OpenAI Realtime.
+        """Get messages from context in a format safe for logging.
 
-        Removes or truncates sensitive data like image content for safe logging.
-
-        This is a placeholder until support for universal LLMContext machinery is added for OpenAI Realtime.
+        Removes or truncates sensitive data like audio content.
 
         Args:
             context: The LLM context containing messages.
 
         Returns:
-            List of messages in a format ready for logging about OpenAI Realtime.
+            List of messages with sensitive data redacted.
         """
-        # NOTE: this is the same as in OpenAIAdapter, as that's what it was
-        # prior to a refactor. Worth noting that for OpenAI Realtime
-        # specifically, not everything handled here is necessarily supported
-        # (or supported yet).
         msgs = []
         for message in self.get_messages(context):
             msg = copy.deepcopy(message)
             if "content" in msg:
                 if isinstance(msg["content"], list):
                     for item in msg["content"]:
-                        if item["type"] == "image_url":
-                            if item["image_url"]["url"].startswith("data:image/"):
-                                item["image_url"]["url"] = "data:image/..."
-                        if item["type"] == "input_audio":
-                            item["input_audio"]["data"] = "..."
-            if "mime_type" in msg and msg["mime_type"].startswith("image/"):
-                msg["data"] = "..."
+                        if item.get("type") == "input_audio":
+                            item["audio"] = "..."
+                        if item.get("type") == "audio":
+                            item["audio"] = "..."
             msgs.append(msg)
         return msgs
 
     @dataclass
     class ConvertedMessages:
-        """Container for OpenAI-formatted messages converted from universal context."""
+        """Container for Inworld-formatted messages converted from universal context."""
 
         messages: List[events.ConversationItem]
         system_instruction: Optional[str] = None
@@ -111,19 +108,24 @@ class OpenAIRealtimeLLMAdapter(BaseLLMAdapter):
     def _from_universal_context_messages(
         self, universal_context_messages: List[LLMContextMessage]
     ) -> ConvertedMessages:
-        # We can't load a long conversation history into the openai realtime api yet. (The API/model
-        # forgets that it can do audio, if you do a series of `conversation.item.create` calls.) So
-        # our general strategy until this is fixed is just to put everything into a first "user"
-        # message as a single input.
+        """Convert universal context messages to Inworld Realtime format.
 
+        Similar to OpenAI Realtime, we pack conversation history into a single
+        user message since the realtime API doesn't support loading long histories.
+
+        Args:
+            universal_context_messages: List of messages in universal format.
+
+        Returns:
+            ConvertedMessages with Inworld-formatted messages and system instruction.
+        """
         if not universal_context_messages:
             return self.ConvertedMessages(messages=[])
 
         messages = copy.deepcopy(universal_context_messages)
         system_instruction = None
 
-        # If we have a "system" message as our first message,
-        # pull that out into session "instructions"
+        # Extract system message as session instructions
         if messages[0].get("role") == "system":
             system = messages.pop(0)
             content = system.get("content")
@@ -139,15 +141,14 @@ class OpenAIRealtimeLLMAdapter(BaseLLMAdapter):
             if msg.get("role") in ("system", "developer"):
                 msg["role"] = "user"
 
-        # If we have just a single "user" item, we can just send it normally
+        # Single user message can be sent normally
         if len(messages) == 1 and messages[0].get("role") == "user":
             return self.ConvertedMessages(
                 messages=[self._from_universal_context_message(messages[0])],
                 system_instruction=system_instruction,
             )
 
-        # Otherwise, let's pack everything into a single "user" message with a bit of
-        # explanation for the LLM
+        # Pack multiple messages into a single user message
         intro_text = """
         This is a previously saved conversation. Please treat this conversation history as a
         starting point for the current conversation."""
@@ -155,23 +156,27 @@ class OpenAIRealtimeLLMAdapter(BaseLLMAdapter):
         trailing_text = """
         This is the end of the previously saved conversation. Please continue the conversation
         from here. If the last message is a user instruction or question, act on that instruction
-        or answer the question. If the last message is an assistant response, simple say that you
+        or answer the question. If the last message is an assistant response, simply say that you
         are ready to continue the conversation."""
 
         return self.ConvertedMessages(
             messages=[
-                {
-                    "role": "user",
-                    "type": "message",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": "\n\n".join(
-                                [intro_text, json.dumps(messages, indent=2), trailing_text]
+                events.ConversationItem(
+                    role="user",
+                    type="message",
+                    content=[
+                        events.ItemContent(
+                            type="input_text",
+                            text="\n\n".join(
+                                [
+                                    intro_text,
+                                    json.dumps(messages, indent=2),
+                                    trailing_text,
+                                ]
                             ),
-                        }
+                        )
                     ],
-                }
+                )
             ],
             system_instruction=system_instruction,
         )
@@ -179,22 +184,32 @@ class OpenAIRealtimeLLMAdapter(BaseLLMAdapter):
     def _from_universal_context_message(
         self, message: LLMContextMessage
     ) -> events.ConversationItem:
+        """Convert a single universal context message to Inworld format.
+
+        Args:
+            message: Message in universal format.
+
+        Returns:
+            ConversationItem formatted for Inworld Realtime API.
+        """
         if message.get("role") == "user":
             content = message.get("content")
-            if isinstance(message.get("content"), list):
-                content = ""
-                for c in message.get("content"):
+            if isinstance(content, list):
+                text_content = ""
+                for c in content:
                     if c.get("type") == "text":
-                        content += " " + c.get("text")
+                        text_content += " " + c.get("text")
                     else:
                         logger.error(
                             f"Unhandled content type in context message: {c.get('type')} - {message}"
                         )
+                content = text_content.strip()
             return events.ConversationItem(
                 role="user",
                 type="message",
                 content=[events.ItemContent(type="input_text", text=content)],
             )
+
         if message.get("role") == "assistant" and message.get("tool_calls"):
             tc = message.get("tool_calls")[0]
             return events.ConversationItem(
@@ -203,17 +218,18 @@ class OpenAIRealtimeLLMAdapter(BaseLLMAdapter):
                 name=tc["function"]["name"],
                 arguments=tc["function"]["arguments"],
             )
+
         logger.error(f"Unhandled message type in _from_universal_context_message: {message}")
 
     @staticmethod
-    def _to_openai_realtime_function_format(function: FunctionSchema) -> Dict[str, Any]:
-        """Convert a function schema to OpenAI Realtime format.
+    def _to_inworld_function_format(function: FunctionSchema) -> Dict[str, Any]:
+        """Convert a function schema to Inworld Realtime function format.
 
         Args:
             function: The function schema to convert.
 
         Returns:
-            Dictionary in OpenAI Realtime function format.
+            Dictionary in Inworld Realtime function format.
         """
         return {
             "type": "function",
@@ -227,19 +243,13 @@ class OpenAIRealtimeLLMAdapter(BaseLLMAdapter):
         }
 
     def to_provider_tools_format(self, tools_schema: ToolsSchema) -> List[Dict[str, Any]]:
-        """Convert tool schemas to OpenAI Realtime function-calling format.
+        """Convert tool schemas to Inworld Realtime format.
 
         Args:
             tools_schema: The tools schema containing functions to convert.
 
         Returns:
-            List of function definitions in OpenAI Realtime format.
+            List of tool definitions in Inworld Realtime format.
         """
         functions_schema = tools_schema.standard_tools
-        formatted_standard_tools = [
-            self._to_openai_realtime_function_format(func) for func in functions_schema
-        ]
-        custom_openai_tools = []
-        if tools_schema.custom_tools:
-            custom_openai_tools = tools_schema.custom_tools.get(AdapterType.OPENAI, [])
-        return formatted_standard_tools + custom_openai_tools
+        return [self._to_inworld_function_format(func) for func in functions_schema]
