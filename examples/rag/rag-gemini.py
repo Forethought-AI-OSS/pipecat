@@ -52,7 +52,7 @@ import os
 import time
 
 from dotenv import load_dotenv
-from google import genai
+from google import genai  # pyright: ignore[reportAttributeAccessIssue]
 from loguru import logger
 
 from pipecat.adapters.schemas.function_schema import FunctionSchema
@@ -87,7 +87,7 @@ def get_rag_content():
     """Get the RAG content from the file."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     rag_content_path = os.path.join(script_dir, "assets", "rag-content.txt")
-    with open(rag_content_path, "r") as f:
+    with open(rag_content_path) as f:
         return f.read()
 
 
@@ -179,10 +179,10 @@ transport_params = {
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info(f"Starting bot")
 
-    stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
+    stt = DeepgramSTTService(api_key=os.environ["DEEPGRAM_API_KEY"])
 
     tts = CartesiaTTSService(
-        api_key=os.getenv("CARTESIA_API_KEY"),
+        api_key=os.environ["CARTESIA_API_KEY"],
         settings=CartesiaTTSService.Settings(
             voice="f9836c6e-a0bd-460e-9d3c-f7299fa60f94",  # Southern Lady
         ),
@@ -197,7 +197,7 @@ Your response will be turned into speech so use only simple words and punctuatio
 """
 
     llm = GoogleLLMService(
-        api_key=os.getenv("GOOGLE_API_KEY"),
+        api_key=os.environ["GOOGLE_API_KEY"],
         settings=GoogleLLMService.Settings(
             model=VOICE_MODEL,
             system_instruction=system_prompt,

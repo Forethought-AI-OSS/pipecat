@@ -12,7 +12,7 @@ adapters that handle tool format conversion and standardization.
 
 import warnings
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Generic, List, Optional, TypeVar
+from typing import Any, Generic, TypeVar
 
 from loguru import logger
 
@@ -50,10 +50,10 @@ class BaseLLMAdapter(ABC, Generic[TLLMInvocationParams]):
     def __init__(self):
         """Initialize the adapter."""
         self._warned_system_instruction = False
-        self._builtin_tools: Dict[str, FunctionSchema] = {}
+        self._builtin_tools: dict[str, FunctionSchema] = {}
 
     @property
-    def builtin_tools(self) -> Dict[str, FunctionSchema]:
+    def builtin_tools(self) -> dict[str, FunctionSchema]:
         """Built-in tools automatically merged into every inference request.
 
         Keyed by tool name for O(1) lookup, insertion, and removal.  The
@@ -90,7 +90,7 @@ class BaseLLMAdapter(ABC, Generic[TLLMInvocationParams]):
         pass
 
     @abstractmethod
-    def to_provider_tools_format(self, tools_schema: ToolsSchema) -> List[Any]:
+    def to_provider_tools_format(self, tools_schema: ToolsSchema) -> list[Any]:
         """Convert tools schema to the provider's specific format.
 
         Args:
@@ -102,7 +102,7 @@ class BaseLLMAdapter(ABC, Generic[TLLMInvocationParams]):
         pass
 
     @abstractmethod
-    def get_messages_for_logging(self, context: LLMContext) -> List[Dict[str, Any]]:
+    def get_messages_for_logging(self, context: LLMContext) -> list[dict[str, Any]]:
         """Get messages from a universal LLM context in a format ready for logging about this provider.
 
         Args:
@@ -125,18 +125,24 @@ class BaseLLMAdapter(ABC, Generic[TLLMInvocationParams]):
         """
         return LLMSpecificMessage(llm=self.id_for_llm_specific_messages, message=message)
 
-    def get_messages(self, context: LLMContext) -> List[LLMContextMessage]:
+    def get_messages(
+        self, context: LLMContext, *, truncate_large_values: bool = False
+    ) -> list[LLMContextMessage]:
         """Get messages from the LLM context, including standard and LLM-specific messages.
 
         Args:
             context: The LLM context containing messages.
+            truncate_large_values: If True, return deep copies of messages with
+                large values replaced by short placeholders.
 
         Returns:
             List of messages including standard and LLM-specific messages.
         """
-        return context.get_messages(self.id_for_llm_specific_messages)
+        return context.get_messages(
+            self.id_for_llm_specific_messages, truncate_large_values=truncate_large_values
+        )
 
-    def from_standard_tools(self, tools: Any) -> List[Any] | NotGiven:
+    def from_standard_tools(self, tools: Any) -> list[Any] | NotGiven:
         """Convert tools from standard format to provider format.
 
         Built-in tools are automatically merged into the schema before conversion so that every
@@ -182,8 +188,8 @@ class BaseLLMAdapter(ABC, Generic[TLLMInvocationParams]):
         self,
         messages: list,
         *,
-        system_instruction: Optional[str] = None,
-    ) -> Optional[str]:
+        system_instruction: str | None = None,
+    ) -> str | None:
         """Extract an initial ``"system"`` message for use as a system instruction.
 
         Only useful for services that expect the system instruction as a
@@ -241,11 +247,11 @@ class BaseLLMAdapter(ABC, Generic[TLLMInvocationParams]):
 
     def _resolve_system_instruction(
         self,
-        system_from_context: Optional[str],
-        system_instruction: Optional[str],
+        system_from_context: str | None,
+        system_instruction: str | None,
         *,
         discard_context_system: bool,
-    ) -> Optional[str]:
+    ) -> str | None:
         """Resolve conflict between ``system_instruction`` and an extracted context system message.
 
         Args:

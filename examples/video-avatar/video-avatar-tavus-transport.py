@@ -37,8 +37,8 @@ async def main():
     async with aiohttp.ClientSession() as session:
         transport = TavusTransport(
             bot_name="Pipecat bot",
-            api_key=os.getenv("TAVUS_API_KEY"),
-            replica_id=os.getenv("TAVUS_REPLICA_ID"),
+            api_key=os.environ["TAVUS_API_KEY"],
+            replica_id=os.environ["TAVUS_REPLICA_ID"],
             session=session,
             params=TavusParams(
                 audio_in_enabled=True,
@@ -47,17 +47,17 @@ async def main():
             ),
         )
 
-        stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
+        stt = DeepgramSTTService(api_key=os.environ["DEEPGRAM_API_KEY"])
 
         tts = CartesiaTTSService(
-            api_key=os.getenv("CARTESIA_API_KEY"),
+            api_key=os.environ["CARTESIA_API_KEY"],
             settings=CartesiaTTSService.Settings(
                 voice="a167e0f3-df7e-4d52-a9c3-f949145efdab",
             ),
         )
 
         llm = GoogleLLMService(
-            api_key=os.getenv("GOOGLE_API_KEY"),
+            api_key=os.environ["GOOGLE_API_KEY"],
             settings=GoogleLLMService.Settings(
                 system_instruction="You are a helpful assistant in a voice conversation. Your responses will be spoken aloud, so avoid emojis, bullet points, or other formatting that can't be spoken. Respond to what the user said in a creative, helpful, and brief way.",
             ),
@@ -90,6 +90,14 @@ async def main():
                 enable_usage_metrics=True,
             ),
         )
+
+        @transport.event_handler("on_connected")
+        async def on_connected(transport, data):
+            # Extract the room name to build the conversation URL. Share this
+            # URL with a frontend client so it can join the same Daily room.
+            room_name = data.get("callConfig", {}).get("roomName")
+            conversation_url = f"https://tavus.daily.co/{room_name}"
+            logger.info(f"Conversation URL: {conversation_url}")
 
         @transport.event_handler("on_client_connected")
         async def on_client_connected(transport, participant):

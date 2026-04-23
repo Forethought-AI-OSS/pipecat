@@ -13,7 +13,7 @@ Inworld's Realtime API.
 import copy
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, TypedDict
 
 from loguru import logger
 
@@ -33,9 +33,9 @@ class InworldRealtimeLLMInvocationParams(TypedDict):
         tools: List of tool definitions.
     """
 
-    system_instruction: Optional[str]
-    messages: List[events.ConversationItem]
-    tools: List[Dict[str, Any]]
+    system_instruction: str | None
+    messages: list[events.ConversationItem]
+    tools: list[dict[str, Any]]
 
 
 class InworldRealtimeLLMAdapter(BaseLLMAdapter):
@@ -51,7 +51,7 @@ class InworldRealtimeLLMAdapter(BaseLLMAdapter):
         return "inworld-realtime"
 
     def get_llm_invocation_params(
-        self, context: LLMContext, *, system_instruction: Optional[str] = None
+        self, context: LLMContext, *, system_instruction: str | None = None
     ) -> InworldRealtimeLLMInvocationParams:
         """Get Inworld Realtime-specific LLM invocation parameters from a universal LLM context.
 
@@ -74,10 +74,10 @@ class InworldRealtimeLLMAdapter(BaseLLMAdapter):
             "tools": self.from_standard_tools(context.tools) or [],
         }
 
-    def get_messages_for_logging(self, context) -> List[Dict[str, Any]]:
+    def get_messages_for_logging(self, context) -> list[dict[str, Any]]:
         """Get messages from context in a format safe for logging.
 
-        Removes or truncates sensitive data like audio content.
+        Binary data (images, audio) is replaced with short placeholders.
 
         Args:
             context: The LLM context containing messages.
@@ -85,28 +85,17 @@ class InworldRealtimeLLMAdapter(BaseLLMAdapter):
         Returns:
             List of messages with sensitive data redacted.
         """
-        msgs = []
-        for message in self.get_messages(context):
-            msg = copy.deepcopy(message)
-            if "content" in msg:
-                if isinstance(msg["content"], list):
-                    for item in msg["content"]:
-                        if item.get("type") == "input_audio":
-                            item["audio"] = "..."
-                        if item.get("type") == "audio":
-                            item["audio"] = "..."
-            msgs.append(msg)
-        return msgs
+        return self.get_messages(context, truncate_large_values=True)
 
     @dataclass
     class ConvertedMessages:
         """Container for Inworld-formatted messages converted from universal context."""
 
-        messages: List[events.ConversationItem]
-        system_instruction: Optional[str] = None
+        messages: list[events.ConversationItem]
+        system_instruction: str | None = None
 
     def _from_universal_context_messages(
-        self, universal_context_messages: List[LLMContextMessage]
+        self, universal_context_messages: list[LLMContextMessage]
     ) -> ConvertedMessages:
         """Convert universal context messages to Inworld Realtime format.
 
@@ -222,7 +211,7 @@ class InworldRealtimeLLMAdapter(BaseLLMAdapter):
         logger.error(f"Unhandled message type in _from_universal_context_message: {message}")
 
     @staticmethod
-    def _to_inworld_function_format(function: FunctionSchema) -> Dict[str, Any]:
+    def _to_inworld_function_format(function: FunctionSchema) -> dict[str, Any]:
         """Convert a function schema to Inworld Realtime function format.
 
         Args:
@@ -242,7 +231,7 @@ class InworldRealtimeLLMAdapter(BaseLLMAdapter):
             },
         }
 
-    def to_provider_tools_format(self, tools_schema: ToolsSchema) -> List[Dict[str, Any]]:
+    def to_provider_tools_format(self, tools_schema: ToolsSchema) -> list[dict[str, Any]]:
         """Convert tool schemas to Inworld Realtime format.
 
         Args:

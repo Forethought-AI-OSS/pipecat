@@ -16,7 +16,7 @@ import io
 import time
 import typing
 import wave
-from typing import Awaitable, Callable, Optional
+from collections.abc import Awaitable, Callable
 
 from loguru import logger
 from pydantic import BaseModel
@@ -63,9 +63,9 @@ class FastAPIWebsocketParams(TransportParams):
     """
 
     add_wav_header: bool = False
-    serializer: Optional[FrameSerializer] = None
-    session_timeout: Optional[int] = None
-    fixed_audio_packet_size: Optional[int] = None
+    serializer: FrameSerializer | None = None
+    session_timeout: int | None = None
+    fixed_audio_packet_size: int | None = None
 
 
 class FastAPIWebsocketCallbacks(BaseModel):
@@ -255,7 +255,9 @@ class FastAPIWebsocketInputTransport(BaseInputTransport):
         if self._params.serializer:
             await self._params.serializer.setup(frame)
         if not self._monitor_websocket_task and self._params.session_timeout:
-            self._monitor_websocket_task = self.create_task(self._monitor_websocket())
+            self._monitor_websocket_task = self.create_task(
+                self._monitor_websocket(self._params.session_timeout)
+            )
         await self._client.trigger_client_connected()
         await self.push_frame(ClientConnectedFrame())
         if not self._receive_task:
@@ -322,9 +324,9 @@ class FastAPIWebsocketInputTransport(BaseInputTransport):
         if not self._client.is_closing:
             await self._client.trigger_client_disconnected()
 
-    async def _monitor_websocket(self):
-        """Wait for self._params.session_timeout seconds, if the websocket is still open, trigger timeout event."""
-        await asyncio.sleep(self._params.session_timeout)
+    async def _monitor_websocket(self, timeout: int):
+        """Wait for ``timeout`` seconds, then trigger the client-timeout event if still open."""
+        await asyncio.sleep(timeout)
         await self._client.trigger_client_timeout()
 
 
@@ -550,8 +552,8 @@ class FastAPIWebsocketTransport(BaseTransport):
         self,
         websocket: WebSocket,
         params: FastAPIWebsocketParams,
-        input_name: Optional[str] = None,
-        output_name: Optional[str] = None,
+        input_name: str | None = None,
+        output_name: str | None = None,
     ):
         """Initialize the FastAPI WebSocket transport.
 

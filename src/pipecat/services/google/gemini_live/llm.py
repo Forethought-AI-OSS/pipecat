@@ -17,8 +17,8 @@ import io
 import time
 import uuid
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from enum import StrEnum
+from typing import Any
 
 from loguru import logger
 from PIL import Image
@@ -78,6 +78,7 @@ try:
         AudioTranscriptionConfig,
         AutomaticActivityDetection,
         Blob,
+        Content,
         ContextWindowCompressionConfig,
         EndSensitivity,
         FunctionResponse,
@@ -89,6 +90,7 @@ try:
         LiveServerMessage,
         MediaResolution,
         Modality,
+        Part,
         ProactivityConfig,
         RealtimeInputConfig,
         SessionResumptionConfig,
@@ -109,7 +111,7 @@ MAX_CONSECUTIVE_FAILURES = 3
 CONNECTION_ESTABLISHED_THRESHOLD = 10.0  # seconds
 
 
-def language_to_gemini_language(language: Language) -> Optional[str]:
+def language_to_gemini_language(language: Language) -> str | None:
     """Maps a Language enum value to a Gemini Live supported language code.
 
     Source:
@@ -206,7 +208,7 @@ def language_to_gemini_language(language: Language) -> Optional[str]:
     return resolve_language(language, LANGUAGE_MAP, use_base_code=False)
 
 
-class GeminiModalities(Enum):
+class GeminiModalities(StrEnum):
     """Supported modalities for Gemini Live.
 
     Parameters:
@@ -218,7 +220,7 @@ class GeminiModalities(Enum):
     AUDIO = "AUDIO"
 
 
-class GeminiMediaResolution(str, Enum):
+class GeminiMediaResolution(StrEnum):
     """Media resolution options for Gemini Live.
 
     Parameters:
@@ -245,11 +247,11 @@ class GeminiVADParams(BaseModel):
         silence_duration_ms: Silence duration threshold in milliseconds. Defaults to None.
     """
 
-    disabled: Optional[bool] = Field(default=None)
-    start_sensitivity: Optional[StartSensitivity] = Field(default=None)
-    end_sensitivity: Optional[EndSensitivity] = Field(default=None)
-    prefix_padding_ms: Optional[int] = Field(default=None)
-    silence_duration_ms: Optional[int] = Field(default=None)
+    disabled: bool | None = Field(default=None)
+    start_sensitivity: StartSensitivity | None = Field(default=None)
+    end_sensitivity: EndSensitivity | None = Field(default=None)
+    prefix_padding_ms: int | None = Field(default=None)
+    silence_duration_ms: int | None = Field(default=None)
 
 
 class ContextWindowCompressionParams(BaseModel):
@@ -261,9 +263,7 @@ class ContextWindowCompressionParams(BaseModel):
     """
 
     enabled: bool = Field(default=False)
-    trigger_tokens: Optional[int] = Field(
-        default=None
-    )  # None = use default (80% of context window)
+    trigger_tokens: int | None = Field(default=None)  # None = use default (80% of context window)
 
 
 class InputParams(BaseModel):
@@ -303,23 +303,23 @@ class InputParams(BaseModel):
         extra: Additional parameters. Defaults to empty dict.
     """
 
-    frequency_penalty: Optional[float] = Field(default=None, ge=0.0, le=2.0)
-    max_tokens: Optional[int] = Field(default=4096, ge=1)
-    presence_penalty: Optional[float] = Field(default=None, ge=0.0, le=2.0)
-    temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
-    top_k: Optional[int] = Field(default=None, ge=0)
-    top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0)
-    modalities: Optional[GeminiModalities] = Field(default=GeminiModalities.AUDIO)
-    language: Optional[Language] = Field(default=Language.EN_US)
-    media_resolution: Optional[GeminiMediaResolution] = Field(
+    frequency_penalty: float | None = Field(default=None, ge=0.0, le=2.0)
+    max_tokens: int | None = Field(default=4096, ge=1)
+    presence_penalty: float | None = Field(default=None, ge=0.0, le=2.0)
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    top_k: int | None = Field(default=None, ge=0)
+    top_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    modalities: GeminiModalities | None = Field(default=GeminiModalities.AUDIO)
+    language: Language | None = Field(default=Language.EN_US)
+    media_resolution: GeminiMediaResolution | None = Field(
         default=GeminiMediaResolution.UNSPECIFIED
     )
-    vad: Optional[GeminiVADParams] = Field(default=None)
-    context_window_compression: Optional[ContextWindowCompressionParams] = Field(default=None)
-    thinking: Optional[ThinkingConfig] = Field(default=None)
-    enable_affective_dialog: Optional[bool] = Field(default=None)
-    proactivity: Optional[ProactivityConfig] = Field(default=None)
-    extra: Optional[Dict[str, Any]] = Field(default_factory=dict)
+    vad: GeminiVADParams | None = Field(default=None)
+    context_window_compression: ContextWindowCompressionParams | None = Field(default=None)
+    thinking: ThinkingConfig | None = Field(default=None)
+    enable_affective_dialog: bool | None = Field(default=None)
+    proactivity: ProactivityConfig | None = Field(default=None)
+    extra: dict[str, Any] | None = Field(default_factory=dict)
 
 
 @dataclass
@@ -374,17 +374,17 @@ class GeminiLiveLLMService(LLMService):
         self,
         *,
         api_key: str,
-        model: Optional[str] = None,
+        model: str | None = None,
         voice_id: str = "Charon",
         start_audio_paused: bool = False,
         start_video_paused: bool = False,
-        system_instruction: Optional[str] = None,
-        tools: Optional[Union[List[dict], ToolsSchema]] = None,
-        params: Optional[InputParams] = None,
-        settings: Optional[Settings] = None,
+        system_instruction: str | None = None,
+        tools: list[dict] | ToolsSchema | None = None,
+        params: InputParams | None = None,
+        settings: Settings | None = None,
         inference_on_context_initialization: bool = True,
         file_api_base_url: str = "https://generativelanguage.googleapis.com/v1beta/files",
-        http_options: Optional[HttpOptions] = None,
+        http_options: HttpOptions | None = None,
         **kwargs,
     ):
         """Initialize the Gemini Live LLM service.
@@ -537,18 +537,18 @@ class GeminiLiveLLMService(LLMService):
         self._connection_start_time = None
 
         self._file_api_base_url = file_api_base_url
-        self._file_api: Optional[GeminiFileAPI] = None
+        self._file_api: GeminiFileAPI | None = None
 
         # Grounding metadata tracking
         self._search_result_buffer = ""
         self._accumulated_grounding_metadata = None
 
         # Session resumption
-        self._session_resumption_handle: Optional[str] = None
+        self._session_resumption_handle: str | None = None
 
         # Bookkeeping for ending gracefully (i.e. after the bot is finished)
-        self._end_frame_pending_bot_turn_finished: Optional[EndFrame] = None
-        self._end_frame_deferral_timeout_task: Optional[asyncio.Task] = None
+        self._end_frame_pending_bot_turn_finished: EndFrame | None = None
+        self._end_frame_deferral_timeout_task: asyncio.Task | None = None
 
         # Initialize the API client. Subclasses can override this if needed.
         self.create_client()
@@ -908,7 +908,7 @@ class GeminiLiveLLMService(LLMService):
             self._end_frame_deferral_timeout_task.cancel()
         self._end_frame_deferral_timeout_task = None
 
-    def _get_history_config(self) -> Optional[HistoryConfig]:
+    def _get_history_config(self) -> HistoryConfig | None:
         """Return the history config for the Live API connection.
 
         Subclasses can override this to disable history config (e.g. Vertex AI
@@ -916,7 +916,7 @@ class GeminiLiveLLMService(LLMService):
         """
         return HistoryConfig(initial_history_in_client_content=True)
 
-    async def _connect(self, session_resumption_handle: Optional[str] = None):
+    async def _connect(self, session_resumption_handle: str | None = None):
         """Establish client connection to Gemini Live API."""
         if self._session:
             # Here we assume that if we have a client, we are connected. We
@@ -1264,8 +1264,60 @@ class GeminiLiveLLMService(LLMService):
         except Exception as e:
             await self._handle_send_error(e)
 
-    async def _create_initial_response(self):
-        """Create initial response based on context history."""
+    async def _create_initial_response(self, for_reconnect: bool = False):
+        """Seed conversation history and optionally trigger an initial model response.
+
+        Behavior by case:
+
+        Initial connection, ``_inference_on_context_initialization=True``:
+            Seed with ``turn_complete=True`` so the model generates a first
+            response to the trailing user turn. On Gemini 3.x we also send a
+            realtime-input nudge (the model won't actually run inference
+            without one).
+
+        Initial connection, ``_inference_on_context_initialization=False``:
+            Seed with ``turn_complete=False`` (no response yet). On Gemini 2.5
+            we set ``_needs_initial_turn_complete_message`` so the next
+            ``user_stopped_speaking`` sends an explicit ``turn_complete=True``;
+            otherwise 2.5 ignores the seeded history when the user's first
+            input is audio. Gemini 3.x merges seeded history and audio
+            cleanly and needs no workaround.
+
+            Note: on Gemini 2.5 the first user utterance after this kind of
+            seed still produces one "naive" response (context-ignoring) that
+            is immediately followed by a context-aware response. This is
+            Gemini 2.5's documented audio-input / history-recall limitation
+            (https://discuss.ai.google.dev/t/audio-input-cannot-trigger-history-recall-in-gemini-live-api-only-text-input-works/111617).
+            It's tolerable at the start of a conversation because the first
+            utterance is usually a greeting.
+
+        Reconnect, Gemini 3.x:
+            Seed with ``turn_complete=False`` — no workaround needed, the
+            next user utterance gets a single history-aware response.
+
+        Reconnect, Gemini 2.5:
+            Force ``turn_complete=True`` on the seed so the model generates
+            an inference over the seeded history immediately (typically a
+            recap/continuation of the conversation). This works around the
+            same Gemini 2.5 audio-input / history-recall limitation noted
+            above
+            (https://discuss.ai.google.dev/t/audio-input-cannot-trigger-history-recall-in-gemini-live-api-only-text-input-works/111617):
+            if we seeded without triggering inference, the user's next
+            utterance — mid-conversation — would briefly hear the bot act
+            like it had forgotten everything before recovering on the
+            following turn. Forcing a recap-style response up front avoids
+            that jarring UX.
+
+        Seed shape:
+            Gemini 2.5's ``send_client_content`` requires the seed's final
+            turn to be a user turn. When it isn't (e.g. on reconnect where
+            the bot had finished speaking before the disconnect), we append
+            a blank user turn to satisfy the server. Gemini 3.x has no such
+            requirement.
+
+        Args:
+            for_reconnect: When True, we're re-seeding after a reconnect.
+        """
         if self._disconnecting:
             return
 
@@ -1280,25 +1332,41 @@ class GeminiLiveLLMService(LLMService):
             self._ready_for_realtime_input = True
             return
 
+        # On reconnect, Gemini 2.5 needs us to force an inference so the user
+        # doesn't momentarily experience a "forgotten" assistant (see
+        # docstring). Gemini 3.x doesn't have that limitation. In the
+        # non-reconnect case we honor the configured setting.
+        if for_reconnect:
+            trigger_inference = not self._is_gemini_3
+        else:
+            trigger_inference = self._inference_on_context_initialization
+
         logger.debug(f"Creating initial response: {messages}")
+
+        # Enforce Gemini 2.5's "seed must end with user turn" requirement.
+        seed_messages = messages
+        if not self._is_gemini_3:
+            last_role = getattr(messages[-1], "role", None)
+            if last_role != "user":
+                seed_messages = messages + [Content(role="user", parts=[Part(text=" ")])]
 
         await self.start_ttfb_metrics()
 
         try:
             await self._session.send_client_content(
-                turns=messages, turn_complete=self._inference_on_context_initialization
+                turns=seed_messages,
+                turn_complete=trigger_inference,
             )
             # Gemini 3.x wants turn_complete=True, but also won't run inference without a realtime input
-            if self._is_gemini_3 and self._inference_on_context_initialization:
+            if self._is_gemini_3 and trigger_inference:
                 await self._session.send_realtime_input(text=" ")
         except Exception as e:
             await self._handle_send_error(e)
 
-        # If we're generating a response right away upon initializing
-        # conversation history, set a flag saying that we'll need a turn
-        # complete message when the user stops speaking.
-        # This is a quirky workaround, and not one that Gemini 3 needs.
-        if not self._inference_on_context_initialization and not self._is_gemini_3:
+        # Gemini 2.5-only workaround: when we've seeded without triggering
+        # inference, flag that the next user_stopped_speaking should send
+        # turn_complete=True so 2.5 picks up the seeded history.
+        if not trigger_inference and not self._is_gemini_3:
             self._needs_initial_turn_complete_message = True
 
         self._ready_for_realtime_input = True
@@ -1336,7 +1404,7 @@ class GeminiLiveLLMService(LLMService):
 
     @traced_gemini_live(operation="llm_tool_result")
     async def _tool_result(
-        self, tool_call_id: str, tool_name: str, tool_result_message: Dict[str, Any]
+        self, tool_call_id: str, tool_name: str, tool_result_message: dict[str, Any]
     ):
         """Send tool result back to the API."""
         if self._disconnecting or not self._session:
@@ -1365,13 +1433,12 @@ class GeminiLiveLLMService(LLMService):
             self._ready_for_realtime_input = True
         elif self._context:
             # Reconnect without session resumption (e.g. error occurred
-            # before server sent a resumption handle).
-            # TODO: ideally we'd re-send conversation history here via
-            # _create_initial_response(), but that currently doesn't handle
-            # the reconnect case properly. This should be very rare — the
-            # connection would have to drop before we've received our first
-            # session_resumption_handle from the server.
-            self._ready_for_realtime_input = True
+            # before server sent a resumption handle): re-seed conversation
+            # history so the new session retains full context before
+            # accepting input. We route through _create_initial_response so
+            # that the seed/commit dance stays in one place. See that
+            # method's docstring for the reconnect-specific behavior.
+            await self._create_initial_response(for_reconnect=True)
         else:
             # Initial connection: session is ready before context has
             # arrived. Nothing to do — _handle_context will call
@@ -1513,12 +1580,12 @@ class GeminiLiveLLMService(LLMService):
 
     @traced_stt
     async def _handle_user_transcription(
-        self, transcript: str, is_final: bool, language: Optional[Language] = None
+        self, transcript: str, is_final: bool, language: Language | None = None
     ):
         """Handle a transcription result with tracing."""
         pass
 
-    async def _push_user_transcription(self, text: str, result: Optional[LiveServerMessage] = None):
+    async def _push_user_transcription(self, text: str, result: LiveServerMessage | None = None):
         """Push a user transcription frame upstream.
 
         Helper method to ensure consistent handling of user transcriptions
@@ -1697,7 +1764,7 @@ class GeminiLiveLLMService(LLMService):
 
         if grounding_metadata.grounding_chunks and grounding_metadata.grounding_supports:
             # Create a mapping of chunk indices to origins
-            chunk_to_origin: Dict[int, LLMSearchOrigin] = {}
+            chunk_to_origin: dict[int, LLMSearchOrigin] = {}
 
             for index, chunk in enumerate(grounding_metadata.grounding_chunks):
                 if chunk.web:

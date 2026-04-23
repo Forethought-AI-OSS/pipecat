@@ -7,7 +7,7 @@
 import argparse
 import asyncio
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -41,7 +41,7 @@ EVAL_WEATHER_AND_RESTAURANT = EvalConfig(
 
 EVAL_ONLINE_SEARCH = EvalConfig(
     prompt="What's the current date in UTC?",
-    eval=f"Current date in UTC is {datetime.now(timezone.utc).strftime('%A, %B %d, %Y')}.",
+    eval=f"Current date in UTC is {datetime.now(UTC).strftime('%A, %B %d, %Y')}.",
 )
 
 EVAL_SWITCH_LANGUAGE = EvalConfig(
@@ -108,6 +108,7 @@ TESTS_VOICE = [
     ("voice/voice-elevenlabs.py", EVAL_SIMPLE_MATH),
     ("voice/voice-elevenlabs-http.py", EVAL_SIMPLE_MATH),
     ("voice/voice-xai.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-xai-http.py", EVAL_SIMPLE_MATH),
     ("voice/voice-azure.py", EVAL_SIMPLE_MATH),
     ("voice/voice-azure-http.py", EVAL_SIMPLE_MATH),
     ("voice/voice-openai.py", EVAL_SIMPLE_MATH),
@@ -147,6 +148,7 @@ TESTS_VOICE = [
     ("voice/voice-kokoro.py", EVAL_SIMPLE_MATH),
     ("voice/voice-resemble.py", EVAL_SIMPLE_MATH),
     ("voice/voice-smallest.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-mistral.py", EVAL_SIMPLE_MATH),
     ("voice/voice-openai-responses.py", EVAL_SIMPLE_MATH),
     ("voice/voice-openai-responses-http.py", EVAL_SIMPLE_MATH),
     # Needs a local XTTS docker instance running.

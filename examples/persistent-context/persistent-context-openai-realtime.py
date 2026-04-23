@@ -91,8 +91,9 @@ async def load_conversation(params: FunctionCallParams):
         filename = params.arguments["filename"]
         logger.debug(f"loading conversation from {filename}")
         try:
-            with open(filename, "r") as file:
+            with open(filename) as file:
                 params.context.set_messages(json.load(file))
+                assert isinstance(params.llm, OpenAIRealtimeLLMService)
                 await params.llm.reset_conversation()
                 # NOTE: we manually create a response here rather than relying
                 # on the function callback to trigger one since we've reset the
@@ -171,10 +172,10 @@ transport_params = {
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info(f"Starting bot")
 
-    stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
+    stt = DeepgramSTTService(api_key=os.environ["DEEPGRAM_API_KEY"])
 
     llm = OpenAIRealtimeLLMService(
-        api_key=os.getenv("OPENAI_API_KEY"),
+        api_key=os.environ["OPENAI_API_KEY"],
         settings=OpenAIRealtimeLLMService.Settings(
             system_instruction="""Your knowledge cutoff is 2023-10. You are a helpful and friendly AI.
 

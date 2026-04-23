@@ -7,8 +7,9 @@
 """Deepgram speech-to-text service implementation."""
 
 import asyncio
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field, fields
-from typing import Any, AsyncGenerator, Optional
+from typing import Any
 
 from loguru import logger
 
@@ -64,33 +65,33 @@ class LiveOptions:
     def __init__(
         self,
         *,
-        callback: Optional[str] = None,
-        callback_method: Optional[str] = None,
-        channels: Optional[int] = None,
-        detect_entities: Optional[bool] = None,
-        diarize: Optional[bool] = None,
-        dictation: Optional[bool] = None,
-        encoding: Optional[str] = None,
-        endpointing: Optional[Any] = None,
-        extra: Optional[Any] = None,
-        interim_results: Optional[bool] = None,
-        keyterm: Optional[Any] = None,
-        keywords: Optional[Any] = None,
-        language: Optional[str] = None,
-        mip_opt_out: Optional[bool] = None,
-        model: Optional[str] = None,
-        multichannel: Optional[bool] = None,
-        numerals: Optional[bool] = None,
-        profanity_filter: Optional[bool] = None,
-        punctuate: Optional[bool] = None,
-        redact: Optional[Any] = None,
-        replace: Optional[Any] = None,
-        sample_rate: Optional[int] = None,
-        search: Optional[Any] = None,
-        smart_format: Optional[bool] = None,
-        tag: Optional[Any] = None,
-        utterance_end_ms: Optional[int] = None,
-        version: Optional[str] = None,
+        callback: str | None = None,
+        callback_method: str | None = None,
+        channels: int | None = None,
+        detect_entities: bool | None = None,
+        diarize: bool | None = None,
+        dictation: bool | None = None,
+        encoding: str | None = None,
+        endpointing: Any | None = None,
+        extra: Any | None = None,
+        interim_results: bool | None = None,
+        keyterm: Any | None = None,
+        keywords: Any | None = None,
+        language: str | None = None,
+        mip_opt_out: bool | None = None,
+        model: str | None = None,
+        multichannel: bool | None = None,
+        numerals: bool | None = None,
+        profanity_filter: bool | None = None,
+        punctuate: bool | None = None,
+        redact: Any | None = None,
+        replace: Any | None = None,
+        sample_rate: int | None = None,
+        search: Any | None = None,
+        smart_format: bool | None = None,
+        tag: Any | None = None,
+        utterance_end_ms: int | None = None,
+        version: str | None = None,
         **kwargs,
     ):
         """Initialize live transcription options.
@@ -298,15 +299,15 @@ class DeepgramSTTService(STTService):
         encoding: str = "linear16",
         channels: int = 1,
         multichannel: bool = False,
-        sample_rate: Optional[int] = None,
-        callback: Optional[str] = None,
-        callback_method: Optional[str] = None,
-        tag: Optional[Any] = None,
-        mip_opt_out: Optional[bool] = None,
-        live_options: Optional[LiveOptions] = None,
-        addons: Optional[dict] = None,
-        settings: Optional[Settings] = None,
-        ttfs_p99_latency: Optional[float] = DEEPGRAM_TTFS_P99,
+        sample_rate: int | None = None,
+        callback: str | None = None,
+        callback_method: str | None = None,
+        tag: Any | None = None,
+        mip_opt_out: bool | None = None,
+        live_options: LiveOptions | None = None,
+        addons: dict | None = None,
+        settings: Settings | None = None,
+        ttfs_p99_latency: float | None = DEEPGRAM_TTFS_P99,
         **kwargs,
     ):
         """Initialize the Deepgram STT service.
@@ -443,6 +444,7 @@ class DeepgramSTTService(STTService):
 
         self._connection = None
         self._connection_task = None
+        self._connection_ready = asyncio.Event()
 
     def can_generate_metrics(self) -> bool:
         """Check if this service can generate processing metrics.
@@ -451,6 +453,24 @@ class DeepgramSTTService(STTService):
             True, as Deepgram service supports metrics generation.
         """
         return True
+
+    async def _do_reconnect(self):
+        """Disconnect and reconnect to Deepgram, waiting until ready.
+
+        Called by ``STTService._reconnect()`` inside the reconnecting guard.
+        Unlike ``WebsocketSTTService``, Deepgram's ``_connect()`` only
+        launches a background task — the actual WebSocket handshake happens
+        asynchronously. This method waits for ``_connection_ready`` to be set
+        before returning so that buffered audio frames are replayed only after
+        the new connection can accept them.
+
+        Raises:
+            asyncio.TimeoutError: If the connection is not established within
+                05 seconds.
+        """
+        await self._disconnect()
+        await self._connect()
+        await asyncio.wait_for(self._connection_ready.wait(), timeout=5.0)
 
     async def _update_settings(self, delta: STTSettings) -> dict[str, Any]:
         """Apply a settings delta and reconnect if anything changed."""
@@ -463,9 +483,7 @@ class DeepgramSTTService(STTService):
         if isinstance(self._settings, self.Settings):
             self._settings._sync_extra_to_fields()
 
-        if self._connection:
-            await self._disconnect()
-            await self._connect()
+        await self._request_reconnect()
 
         return changed
 
@@ -496,7 +514,7 @@ class DeepgramSTTService(STTService):
         await super().cancel(frame)
         await self._disconnect()
 
-    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
+    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame | None, None]:
         """Send audio data to Deepgram for transcription.
 
         Args:
@@ -581,8 +599,11 @@ class DeepgramSTTService(STTService):
             return
 
         logger.debug("Disconnecting from Deepgram")
-        # Clear self._connection first to prevent run_stt from sending audio
-        # during the close handshake, then close gracefully on the saved ref.
+        # Clear _connection and _connection_ready first to prevent run_stt
+        # from sending audio during the close handshake, and to ensure any
+        # concurrent _do_reconnect() waiter sees a clean state before the
+        # new connection is established.
+        self._connection_ready.clear()
         connection = self._connection
         self._connection = None
 
@@ -600,9 +621,11 @@ class DeepgramSTTService(STTService):
         """
         while True:
             connect_kwargs = self._build_connect_kwargs()
+            keepalive_task = None
             try:
                 async with self._client.listen.v1.connect(**connect_kwargs) as connection:
                     self._connection = connection
+                    self._connection_ready.set()
                     connection.on(EventType.MESSAGE, self._on_message)
                     connection.on(EventType.ERROR, self._on_error)
 
@@ -611,16 +634,14 @@ class DeepgramSTTService(STTService):
                     keepalive_task = self.create_task(
                         self._keepalive_handler(), f"{self}::keepalive"
                     )
-                    try:
-                        await connection.start_listening()
-                    finally:
-                        await self.cancel_task(keepalive_task)
-            except asyncio.CancelledError:
-                raise
+                    await connection.start_listening()
             except Exception as e:
                 logger.warning(f"{self}: Connection lost, will retry: {e}")
             finally:
+                self._connection_ready.clear()
                 self._connection = None
+                if keepalive_task:
+                    await self.cancel_task(keepalive_task)
 
     async def _keepalive_handler(self):
         """Periodically send KeepAlive frames to prevent server-side timeout.
@@ -650,7 +671,7 @@ class DeepgramSTTService(STTService):
 
     @traced_stt
     async def _handle_transcription(
-        self, transcript: str, is_final: bool, language: Optional[Language] = None
+        self, transcript: str, is_final: bool, language: Language | None = None
     ):
         """Handle a transcription result with tracing."""
         pass

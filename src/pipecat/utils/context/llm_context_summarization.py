@@ -13,14 +13,18 @@ context when token limits are reached, enabling efficient long-running conversat
 import json
 import warnings
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from pipecat.services.llm_service import LLMService
 
 from loguru import logger
 
-from pipecat.processors.aggregators.llm_context import LLMContext, LLMSpecificMessage
+from pipecat.processors.aggregators.llm_context import (
+    LLMContext,
+    LLMContextMessage,
+    LLMSpecificMessage,
+)
 
 # Fallback timeout (seconds) used when summarization_timeout is None.
 DEFAULT_SUMMARIZATION_TIMEOUT = 120.0
@@ -90,7 +94,7 @@ class LLMContextSummaryConfig:
 
     target_context_tokens: int = 6000
     min_messages_after_summary: int = 4
-    summarization_prompt: Optional[str] = None
+    summarization_prompt: str | None = None
     summary_message_template: str = "Conversation summary: {summary}"
     llm: Optional["LLMService"] = None
     summarization_timeout: float = DEFAULT_SUMMARIZATION_TIMEOUT
@@ -139,8 +143,8 @@ class LLMAutoContextSummarizationConfig:
             default ``LLMContextSummaryConfig`` values.
     """
 
-    max_context_tokens: Optional[int] = 8000
-    max_unsummarized_messages: Optional[int] = 20
+    max_context_tokens: int | None = 8000
+    max_unsummarized_messages: int | None = 20
     summary_config: LLMContextSummaryConfig = field(default_factory=LLMContextSummaryConfig)
 
     def __post_init__(self):
@@ -192,11 +196,11 @@ class LLMContextSummarizationConfig:
         summarization_prompt: Custom prompt for summary generation.
     """
 
-    max_context_tokens: Optional[int] = 8000
+    max_context_tokens: int | None = 8000
     target_context_tokens: int = 6000
-    max_unsummarized_messages: Optional[int] = 20
+    max_unsummarized_messages: int | None = 20
     min_messages_after_summary: int = 4
-    summarization_prompt: Optional[str] = None
+    summarization_prompt: str | None = None
     summary_message_template: str = "Conversation summary: {summary}"
     llm: Optional["LLMService"] = None
     summarization_timeout: float = DEFAULT_SUMMARIZATION_TIMEOUT
@@ -269,7 +273,7 @@ class LLMMessagesToSummarize:
         last_summarized_index: Index of the last message being summarized
     """
 
-    messages: List[dict]
+    messages: list[LLMContextMessage]
     last_summarized_index: int
 
 
@@ -415,7 +419,7 @@ class LLMContextSummarizationUtil:
 
     @staticmethod
     def _get_earliest_function_call_not_resolved_in_range(
-        messages: List[dict], start_idx: int, summary_end: int
+        messages: list[LLMContextMessage], start_idx: int, summary_end: int
     ) -> int:
         """Find the earliest message index with incomplete function calls.
 
@@ -470,9 +474,10 @@ class LLMContextSummarizationUtil:
             if role == "tool":
                 tool_call_id = msg.get("tool_call_id")
                 if tool_call_id and tool_call_id in pending_tool_calls:
-                    if not LLMContextSummarizationUtil._is_tool_message_pending(
-                        msg.get("content", "")
-                    ):
+                    content = msg.get("content", "")
+                    if not isinstance(content, str):
+                        content = ""
+                    if not LLMContextSummarizationUtil._is_tool_message_pending(content):
                         pending_tool_calls.pop(tool_call_id)
 
             # Check for async tool completion — a developer message with
@@ -480,7 +485,10 @@ class LLMContextSummarizationUtil:
             # async result has arrived and the call is now resolved.
             if role == "developer":
                 try:
-                    parsed = json.loads(msg.get("content", ""))
+                    content = msg.get("content", "")
+                    if not isinstance(content, str):
+                        continue
+                    parsed = json.loads(content)
                     if (
                         isinstance(parsed, dict)
                         and parsed.get("type") == "async_tool"
@@ -522,25 +530,19 @@ class LLMContextSummarizationUtil:
         if len(messages) <= min_messages_to_keep:
             return LLMMessagesToSummarize(messages=[], last_summarized_index=-1)
 
-        # Find first system message index. LLMSpecificMessage instances are excluded because
-        # they are not dict-like and never represent a system message; they hold
-        # service-specific metadata (e.g. thinking blocks) that is always paired with a
-        # standard message.
-        first_system_index = next(
-            (
-                i
-                for i, msg in enumerate(messages)
-                if not isinstance(msg, LLMSpecificMessage) and msg.get("role") == "system"
-            ),
-            -1,
+        # Check if the first message is a system message (initial system prompt).
+        # Only messages[0] is treated as the system message to preserve — system
+        # messages at other positions are mid-conversation injections and should be
+        # included in the summarization range.
+        first_msg = messages[0] if messages else None
+        first_is_system = (
+            first_msg is not None
+            and not isinstance(first_msg, LLMSpecificMessage)
+            and first_msg.get("role") == "system"
         )
 
-        # Messages to summarize are between first system and recent messages
-        # We exclude the first system message itself
-        if first_system_index >= 0:
-            summary_start = first_system_index + 1
-        else:
-            summary_start = 0
+        # Start summarization after the initial system message if present
+        summary_start = 1 if first_is_system else 0
 
         # Get messages to keep (last N messages)
         summary_end = len(messages) - min_messages_to_keep
@@ -580,7 +582,7 @@ class LLMContextSummarizationUtil:
         )
 
     @staticmethod
-    def format_messages_for_summary(messages: List[dict]) -> str:
+    def format_messages_for_summary(messages: list[dict]) -> str:
         """Format messages as a transcript for summarization.
 
         Args:
