@@ -25,7 +25,7 @@ from pipecat.frames.frames import (
     VisionFullResponseStartFrame,
     VisionTextFrame,
 )
-from pipecat.services.settings import VisionSettings
+from pipecat.services.settings import VisionSettings, assert_given
 from pipecat.services.vision_service import VisionService
 
 try:
@@ -127,8 +127,11 @@ class MoondreamService(VisionService):
 
         logger.debug("Loading Moondream model...")
 
+        model_path = assert_given(self._settings.model)
+        if model_path is None:
+            raise ValueError("Moondream model must be specified")
         self._model = AutoModelForCausalLM.from_pretrained(
-            self._settings.model,
+            model_path,
             trust_remote_code=True,
             revision=revision,
             device_map={"": device},
@@ -150,9 +153,14 @@ class MoondreamService(VisionService):
         logger.debug(f"Analyzing image (bytes length: {len(frame.image)})")
 
         def get_image_description(image_bytes: bytes, text: str | None) -> str:
+            if frame.format is None:
+                raise ValueError("Cannot decode image bytes without a format")
             image = Image.frombytes(frame.format, frame.size, image_bytes)
-            image_embeds = self._model.encode_image(image)
-            description = self._model.query(image_embeds, text)["answer"]
+            # `encode_image` and `query` are custom methods provided by the
+            # moondream2 model code (via `trust_remote_code=True`) that pyright
+            # can't see on `AutoModelForCausalLM`'s base type.
+            image_embeds = self._model.encode_image(image)  # pyright: ignore[reportCallIssue]
+            description = self._model.query(image_embeds, text)["answer"]  # pyright: ignore[reportCallIssue]
             return description
 
         description = await asyncio.to_thread(get_image_description, frame.image, frame.text)

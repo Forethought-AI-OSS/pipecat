@@ -37,7 +37,7 @@ from pipecat.metrics.metrics import LLMTokenUsage
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.llm_service import LLMService
-from pipecat.services.settings import NOT_GIVEN, LLMSettings, _NotGiven
+from pipecat.services.settings import NOT_GIVEN, LLMSettings, _NotGiven, assert_given
 from pipecat.utils.tracing.service_decorators import traced_llm
 
 try:
@@ -67,14 +67,14 @@ class AWSBedrockLLMSettings(LLMSettings):
     """
 
     stop_sequences: list[str] | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    latency: str | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    latency: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     enable_prompt_caching: bool | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     additional_model_request_fields: dict[str, Any] | _NotGiven = field(
         default_factory=lambda: NOT_GIVEN
     )
 
 
-class AWSBedrockLLMService(LLMService):
+class AWSBedrockLLMService(LLMService[AWSBedrockLLMAdapter]):
     """AWS Bedrock Large Language Model service implementation.
 
     Provides inference capabilities for AWS Bedrock models including Amazon Nova
@@ -279,9 +279,11 @@ class AWSBedrockLLMService(LLMService):
         """
         messages = []
         system = []
-        effective_instruction = system_instruction or self._settings.system_instruction
-        adapter: AWSBedrockLLMAdapter = self.get_llm_adapter()
-        params: AWSBedrockLLMInvocationParams = adapter.get_llm_invocation_params(
+        effective_instruction = system_instruction or assert_given(
+            self._settings.system_instruction
+        )
+        adapter = self.get_llm_adapter()
+        params = adapter.get_llm_invocation_params(
             context, system_instruction=effective_instruction
         )
         messages = params["messages"]
@@ -369,9 +371,9 @@ class AWSBedrockLLMService(LLMService):
         }
 
     def _get_llm_invocation_params(self, context: LLMContext) -> AWSBedrockLLMInvocationParams:
-        adapter: AWSBedrockLLMAdapter = self.get_llm_adapter()
-        params: AWSBedrockLLMInvocationParams = adapter.get_llm_invocation_params(
-            context, system_instruction=self._settings.system_instruction
+        adapter = self.get_llm_adapter()
+        params = adapter.get_llm_invocation_params(
+            context, system_instruction=assert_given(self._settings.system_instruction)
         )
         return params
 

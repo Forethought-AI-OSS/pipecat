@@ -39,6 +39,7 @@ from pipecat.services.settings import (
     NOT_GIVEN,
     TTSSettings,
     _NotGiven,
+    assert_given,
     is_given,
 )
 from pipecat.services.tts_service import TTSService
@@ -59,7 +60,7 @@ except ModuleNotFoundError as e:
     raise Exception(f"Missing module: {e}")
 
 
-def language_to_google_tts_language(language: Language) -> str | None:
+def language_to_google_tts_language(language: Language) -> str:
     """Convert a Language enum to Google TTS language code.
 
     Source:
@@ -69,7 +70,9 @@ def language_to_google_tts_language(language: Language) -> str | None:
         language: The Language enum value to convert.
 
     Returns:
-        The corresponding Google TTS language code, or None if not supported.
+        The corresponding service language code. If ``language`` is not in
+        the verified mapping, falls back to the full language code string and
+        logs a warning (via ``resolve_language(..., use_base_code=False)``).
     """
     LANGUAGE_MAP = {
         # Arabic
@@ -218,7 +221,7 @@ def language_to_google_tts_language(language: Language) -> str | None:
     return resolve_language(language, LANGUAGE_MAP, use_base_code=False)
 
 
-def language_to_gemini_tts_language(language: Language) -> str | None:
+def language_to_gemini_tts_language(language: Language) -> str:
     """Convert a Language enum to Gemini TTS language code.
 
     Source:
@@ -228,7 +231,9 @@ def language_to_gemini_tts_language(language: Language) -> str | None:
         language: The Language enum value to convert.
 
     Returns:
-        The corresponding Gemini TTS language code, or None if not supported.
+        The corresponding service language code. If ``language`` is not in
+        the verified mapping, falls back to the full language code string and
+        logs a warning (via ``resolve_language(..., use_base_code=False)``).
     """
     LANGUAGE_MAP = {
         # Afrikaans (Preview)
@@ -815,8 +820,9 @@ class GoogleHttpTTSService(TTSService):
 
         try:
             # Check if the voice is a Chirp voice (including Chirp 3) or Journey voice
-            is_chirp_voice = "chirp" in self._settings.voice.lower()
-            is_journey_voice = "journey" in self._settings.voice.lower()
+            voice_name = assert_given(self._settings.voice)
+            is_chirp_voice = "chirp" in (voice_name or "").lower()
+            is_journey_voice = "journey" in (voice_name or "").lower()
 
             # Create synthesis input based on voice_id
             if is_chirp_voice or is_journey_voice:
@@ -1411,7 +1417,7 @@ class GeminiTTSService(GoogleBaseTTSService):
             if self._settings.multi_speaker and self._settings.speaker_configs:
                 # Multi-speaker mode
                 speaker_voice_configs = []
-                for speaker_config in self._settings.speaker_configs:
+                for speaker_config in assert_given(self._settings.speaker_configs):
                     speaker_voice_configs.append(
                         texttospeech_v1.MultispeakerPrebuiltVoice(
                             speaker_alias=speaker_config["speaker_alias"],
@@ -1447,7 +1453,7 @@ class GeminiTTSService(GoogleBaseTTSService):
 
             # Use base class streaming logic with prompt support
             async for frame in self._stream_tts(
-                streaming_config, text, context_id, self._settings.prompt
+                streaming_config, text, context_id, assert_given(self._settings.prompt)
             ):
                 yield frame
 

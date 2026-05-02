@@ -24,7 +24,7 @@ from pipecat.frames.frames import (
     StartFrame,
     TTSAudioRawFrame,
 )
-from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven
+from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven, assert_given
 from pipecat.services.tts_service import TTSService
 from pipecat.utils.tracing.service_decorators import traced_tts
 
@@ -70,8 +70,8 @@ class OpenAITTSSettings(TTSSettings):
         speed: Voice speed control (0.25 to 4.0, default 1.0).
     """
 
-    instructions: str | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    speed: float | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    instructions: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    speed: float | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
 
 
 class OpenAITTSService(TTSService):
@@ -235,12 +235,22 @@ class OpenAITTSService(TTSService):
             Frame: Audio frames containing the synthesized speech data.
         """
         logger.debug(f"{self}: Generating TTS [{text}]")
+        voice = assert_given(self._settings.voice)
+        if voice is None:
+            yield ErrorFrame(error="OpenAI TTS voice must be specified")
+            return
+        if voice not in VALID_VOICES:
+            yield ErrorFrame(
+                error=f"OpenAI TTS voice {voice!r} is not supported "
+                f"(must be one of: {', '.join(sorted(VALID_VOICES))})"
+            )
+            return
         try:
             # Setup API parameters
             create_params = {
                 "input": text,
                 "model": self._settings.model,
-                "voice": VALID_VOICES[self._settings.voice],
+                "voice": VALID_VOICES[voice],
                 "response_format": "pcm",
             }
 

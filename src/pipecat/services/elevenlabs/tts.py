@@ -39,7 +39,7 @@ from pipecat.frames.frames import (
     TTSStoppedFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
-from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven
+from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven, assert_given
 from pipecat.services.tts_service import (
     TextAggregationMode,
     TTSService,
@@ -69,14 +69,17 @@ ELEVENLABS_MULTILINGUAL_MODELS = {
 }
 
 
-def language_to_elevenlabs_language(language: Language) -> str | None:
+def language_to_elevenlabs_language(language: Language) -> str:
     """Convert a Language enum to ElevenLabs language code.
 
     Args:
         language: The Language enum value to convert.
 
     Returns:
-        The corresponding ElevenLabs language code, or None if not supported.
+        The corresponding service language code. If ``language`` is not in
+        the verified mapping, falls back to the base language code (e.g.,
+        ``en`` from ``en-US``) and logs a warning (via
+        ``resolve_language(..., use_base_code=True)``).
     """
     LANGUAGE_MAP = {
         Language.AR: "ar",
@@ -905,6 +908,11 @@ class ElevenLabsTTSService(WebsocketTTSService):
             if not self._websocket or self._websocket.state is State.CLOSED:
                 await self._connect()
 
+            if self._websocket is None:
+                logger.warning(f"{self}: websocket unavailable after reconnect, skipping TTS")
+                yield ErrorFrame(error="websocket unavailable")
+                return
+
             try:
                 if not self.audio_context_available(context_id):
                     await self.create_audio_context(context_id)
@@ -915,7 +923,7 @@ class ElevenLabsTTSService(WebsocketTTSService):
                     self._partial_word_start_time = 0.0
 
                     # Initialize context with voice settings and pronunciation dictionaries
-                    msg = {"text": " ", "context_id": context_id}
+                    msg: dict[str, Any] = {"text": " ", "context_id": context_id}
                     if self._voice_settings:
                         msg["voice_settings"] = self._voice_settings
                     if self._pronunciation_dictionary_locators:
@@ -1259,9 +1267,10 @@ class ElevenLabsHttpTTSService(TTSService):
         # Use the with-timestamps endpoint
         url = f"{self._base_url}/v1/text-to-speech/{self._settings.voice}/stream/with-timestamps"
 
-        payload: dict[str, str | dict[str, float | bool]] = {
+        model_id = assert_given(self._settings.model)
+        payload: dict[str, Any] = {
             "text": text,
-            "model_id": self._settings.model,
+            "model_id": model_id,
         }
 
         # Include previous text as context if available
@@ -1276,11 +1285,12 @@ class ElevenLabsHttpTTSService(TTSService):
                 locator.model_dump() for locator in self._pronunciation_dictionary_locators
             ]
 
-        if self._settings.apply_text_normalization is not None:
-            payload["apply_text_normalization"] = self._settings.apply_text_normalization
+        apply_text_normalization = assert_given(self._settings.apply_text_normalization)
+        if apply_text_normalization is not None:
+            payload["apply_text_normalization"] = apply_text_normalization
 
-        language = self._settings.language
-        if self._settings.model in ELEVENLABS_MULTILINGUAL_MODELS and language:
+        language = assert_given(self._settings.language)
+        if model_id in ELEVENLABS_MULTILINGUAL_MODELS and language:
             payload["language_code"] = language
             logger.debug(f"Using language code: {language}")
         elif language:
@@ -1297,8 +1307,9 @@ class ElevenLabsHttpTTSService(TTSService):
         params = {
             "output_format": self._output_format,
         }
-        if self._settings.optimize_streaming_latency is not None:
-            params["optimize_streaming_latency"] = self._settings.optimize_streaming_latency
+        optimize_streaming_latency = assert_given(self._settings.optimize_streaming_latency)
+        if optimize_streaming_latency is not None:
+            params["optimize_streaming_latency"] = str(optimize_streaming_latency)
         if self._enable_logging is not None:
             params["enable_logging"] = str(self._enable_logging).lower()
 

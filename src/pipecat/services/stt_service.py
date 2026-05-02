@@ -269,7 +269,10 @@ class STTService(AIService):
             language: The language to convert.
 
         Returns:
-            The service-specific language identifier, or None if not supported.
+            The service-specific language identifier. Return ``None`` to
+            indicate an unsupported language. This optional return is an
+            extension hook for future or third-party subclasses; as of
+            2026-04-28, first-party services return a string.
         """
         return Language(language)
 
@@ -408,7 +411,7 @@ class STTService(AIService):
             await self._handle_vad_user_stopped_speaking(frame)
             await self.push_frame(frame, direction)
         elif isinstance(frame, UserStoppedSpeakingFrame):
-            await self._handle_user_stopped_speaking(frame)
+            await self._maybe_reconnect_on_user_stopped_speaking()
             await self.push_frame(frame, direction)
         elif isinstance(frame, STTUpdateSettingsFrame):
             if frame.service is not None and frame.service is not self:
@@ -508,8 +511,8 @@ class STTService(AIService):
         self._finalize_pending = False
         self._last_transcript_time = 0
 
-    async def _handle_user_stopped_speaking(self, frame: UserStoppedSpeakingFrame):
-        """Handle user stopped speaking frame.
+    async def _maybe_reconnect_on_user_stopped_speaking(self):
+        """Check if reconnection is needed after the user stops speaking.
 
         Called when the user's full turn has ended and the transcription has been
         received. Re-enables reconnection and triggers any deferred reconnect that
@@ -859,6 +862,10 @@ class WebsocketSTTService(STTService, WebsocketService):
         Args:
             silence: Silent 16-bit mono PCM audio bytes.
         """
+        if (
+            self._websocket is None
+        ):  # should never happen — caller should gate on _is_keepalive_ready()
+            return
         await self._websocket.send(silence)
 
     async def _report_error(self, error: ErrorFrame):

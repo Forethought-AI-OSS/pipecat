@@ -22,10 +22,11 @@ from openai import (
     AsyncStream,
     DefaultAsyncHttpxClient,
 )
+from openai._types import NotGiven as OpenAINotGiven
 from openai.types.chat import ChatCompletionChunk
 from pydantic import BaseModel, Field
 
-from pipecat.adapters.services.open_ai_adapter import OpenAILLMInvocationParams
+from pipecat.adapters.services.open_ai_adapter import OpenAILLMAdapter, OpenAILLMInvocationParams
 from pipecat.frames.frames import (
     Frame,
     LLMContextFrame,
@@ -38,7 +39,7 @@ from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.llm_service import FunctionCallFromLLM, LLMService
 from pipecat.services.settings import NOT_GIVEN as _NOT_GIVEN
-from pipecat.services.settings import LLMSettings, _NotGiven
+from pipecat.services.settings import LLMSettings, _NotGiven, assert_given
 from pipecat.utils.tracing.service_decorators import traced_llm
 
 
@@ -50,10 +51,27 @@ class OpenAILLMSettings(LLMSettings):
         max_completion_tokens: Maximum completion tokens to generate.
     """
 
-    max_completion_tokens: int | _NotGiven = field(default_factory=lambda: _NOT_GIVEN)
+    # Override inherited LLMSettings fields to also accept openai's NotGiven
+    # sentinel. The service stores openai's NOT_GIVEN in these fields so they
+    # can be passed through unchanged to the AsyncOpenAI client.
+    frequency_penalty: float | None | _NotGiven | OpenAINotGiven = field(
+        default_factory=lambda: _NOT_GIVEN
+    )
+    presence_penalty: float | None | _NotGiven | OpenAINotGiven = field(
+        default_factory=lambda: _NOT_GIVEN
+    )
+    seed: int | None | _NotGiven | OpenAINotGiven = field(default_factory=lambda: _NOT_GIVEN)
+    temperature: float | None | _NotGiven | OpenAINotGiven = field(
+        default_factory=lambda: _NOT_GIVEN
+    )
+    top_p: float | None | _NotGiven | OpenAINotGiven = field(default_factory=lambda: _NOT_GIVEN)
+    max_tokens: int | None | _NotGiven | OpenAINotGiven = field(default_factory=lambda: _NOT_GIVEN)
+    max_completion_tokens: int | None | _NotGiven | OpenAINotGiven = field(
+        default_factory=lambda: _NOT_GIVEN
+    )
 
 
-class BaseOpenAILLMService(LLMService):
+class BaseOpenAILLMService(LLMService[OpenAILLMAdapter]):
     """Base class for all services that use the AsyncOpenAI client.
 
     This service consumes LLMContextFrame frames, which contain a reference to
@@ -279,9 +297,9 @@ class BaseOpenAILLMService(LLMService):
             f"{self}: Generating chat from context {adapter.get_messages_for_logging(context)}"
         )
 
-        params_from_context: OpenAILLMInvocationParams = adapter.get_llm_invocation_params(
+        params_from_context = adapter.get_llm_invocation_params(
             context,
-            system_instruction=self._settings.system_instruction,
+            system_instruction=assert_given(self._settings.system_instruction),
             convert_developer_to_user=not self.supports_developer_role,
         )
 
@@ -356,7 +374,7 @@ class BaseOpenAILLMService(LLMService):
         """
         effective_instruction = system_instruction or self._settings.system_instruction
         adapter = self.get_llm_adapter()
-        invocation_params: OpenAILLMInvocationParams = adapter.get_llm_invocation_params(
+        invocation_params = adapter.get_llm_invocation_params(
             context,
             system_instruction=effective_instruction,
             convert_developer_to_user=not self.supports_developer_role,

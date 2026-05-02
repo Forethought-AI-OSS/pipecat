@@ -18,6 +18,7 @@ from typing import Any
 import httpx
 from loguru import logger
 from openai import NOT_GIVEN, AsyncOpenAI, AsyncStream, DefaultAsyncHttpxClient
+from openai._types import NotGiven as OpenAINotGiven
 from openai.types.responses import (
     ResponseCompletedEvent,
     ResponseFunctionCallArgumentsDeltaEvent,
@@ -49,7 +50,7 @@ from pipecat.services.llm_service import (
     WebsocketReconnectedError,
 )
 from pipecat.services.settings import NOT_GIVEN as _NOT_GIVEN
-from pipecat.services.settings import LLMSettings, _NotGiven
+from pipecat.services.settings import LLMSettings, _NotGiven, assert_given
 from pipecat.utils.tracing.service_decorators import traced_llm
 
 try:
@@ -97,7 +98,16 @@ class OpenAIResponsesLLMSettings(LLMSettings):
         max_completion_tokens: Maximum completion tokens to generate.
     """
 
-    max_completion_tokens: int | _NotGiven = field(default_factory=lambda: _NOT_GIVEN)
+    # Override inherited LLMSettings fields to also accept openai's NotGiven
+    # sentinel. The service stores openai's NOT_GIVEN in these fields so they
+    # can be passed through unchanged to the AsyncOpenAI client.
+    temperature: float | None | _NotGiven | OpenAINotGiven = field(
+        default_factory=lambda: _NOT_GIVEN
+    )
+    top_p: float | None | _NotGiven | OpenAINotGiven = field(default_factory=lambda: _NOT_GIVEN)
+    max_completion_tokens: int | _NotGiven | OpenAINotGiven = field(
+        default_factory=lambda: _NOT_GIVEN
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +115,7 @@ class OpenAIResponsesLLMSettings(LLMSettings):
 # ---------------------------------------------------------------------------
 
 
-class _BaseOpenAIResponsesLLMService(LLMService):
+class _BaseOpenAIResponsesLLMService(LLMService[OpenAIResponsesLLMAdapter]):
     """Shared base for HTTP and WebSocket OpenAI Responses API services.
 
     Contains settings, adapter reference, HTTP client creation, parameter
@@ -284,8 +294,10 @@ class _BaseOpenAIResponsesLLMService(LLMService):
         Returns:
             The LLM's response as a string, or None if no response is generated.
         """
-        adapter: OpenAIResponsesLLMAdapter = self.get_llm_adapter()
-        effective_instruction = system_instruction or self._settings.system_instruction
+        adapter = self.get_llm_adapter()
+        effective_instruction = system_instruction or assert_given(
+            self._settings.system_instruction
+        )
         invocation_params = adapter.get_llm_invocation_params(
             context, system_instruction=effective_instruction
         )
@@ -341,7 +353,9 @@ class _BaseOpenAIResponsesLLMService(LLMService):
 # ---------------------------------------------------------------------------
 
 
-class OpenAIResponsesLLMService(_BaseOpenAIResponsesLLMService, WebsocketLLMService):
+class OpenAIResponsesLLMService(
+    _BaseOpenAIResponsesLLMService, WebsocketLLMService[OpenAIResponsesLLMAdapter]
+):
     """OpenAI Responses API LLM service using WebSocket transport.
 
     Maintains a persistent WebSocket connection to ``wss://api.openai.com/v1/responses``
@@ -735,14 +749,14 @@ class OpenAIResponsesLLMService(_BaseOpenAIResponsesLLMService, WebsocketLLMServ
         if self._needs_drain:
             await self._drain_cancelled_response()
 
-        adapter: OpenAIResponsesLLMAdapter = self.get_llm_adapter()
+        adapter = self.get_llm_adapter()
         logger.debug(
             f"{self}: Generating response from universal context "
             f"{adapter.get_messages_for_logging(context)}"
         )
 
         invocation_params = adapter.get_llm_invocation_params(
-            context, system_instruction=self._settings.system_instruction
+            context, system_instruction=assert_given(self._settings.system_instruction)
         )
 
         full_input = invocation_params["input"]
@@ -975,14 +989,14 @@ class OpenAIResponsesHttpLLMService(_BaseOpenAIResponsesLLMService):
 
     @traced_llm
     async def _process_context(self, context: LLMContext):
-        adapter: OpenAIResponsesLLMAdapter = self.get_llm_adapter()
+        adapter = self.get_llm_adapter()
         logger.debug(
             f"{self}: Generating response from universal context "
             f"{adapter.get_messages_for_logging(context)}"
         )
 
         invocation_params = adapter.get_llm_invocation_params(
-            context, system_instruction=self._settings.system_instruction
+            context, system_instruction=assert_given(self._settings.system_instruction)
         )
 
         params = self._build_response_params(invocation_params)

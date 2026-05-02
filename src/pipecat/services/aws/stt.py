@@ -16,7 +16,7 @@ import random
 import string
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from loguru import logger
 
@@ -30,7 +30,7 @@ from pipecat.frames.frames import (
     TranscriptionFrame,
 )
 from pipecat.services.aws.utils import build_event_message, decode_event, get_presigned_url
-from pipecat.services.settings import STTSettings
+from pipecat.services.settings import STTSettings, assert_given
 from pipecat.services.stt_latency import AWS_TRANSCRIBE_TTFS_P99
 from pipecat.services.stt_service import WebsocketSTTService
 from pipecat.transcriptions.language import Language, resolve_language
@@ -38,6 +38,7 @@ from pipecat.utils.time import time_now_iso8601
 from pipecat.utils.tracing.service_decorators import traced_stt
 
 try:
+    from websockets import Subprotocol
     from websockets.asyncio.client import connect as websocket_connect
     from websockets.protocol import State
 except ModuleNotFoundError as e:
@@ -260,7 +261,7 @@ class AWSTranscribeSTTService(WebsocketSTTService):
 
             logger.debug("Connecting to AWS Transcribe WebSocket")
 
-            language_code = self._settings.language
+            language_code = assert_given(self._settings.language)
             if not language_code:
                 raise ValueError(f"Unsupported language: {language_code}")
 
@@ -314,7 +315,7 @@ class AWSTranscribeSTTService(WebsocketSTTService):
             self._websocket = await websocket_connect(
                 presigned_url,
                 additional_headers=additional_headers,
-                subprotocols=["mqtt"],
+                subprotocols=[Subprotocol("mqtt")],
                 ping_interval=None,
                 ping_timeout=None,
                 compression=None,
@@ -534,20 +535,25 @@ class AWSTranscribeSTTService(WebsocketSTTService):
                             is_final = not result.get("IsPartial", True)
 
                             if transcript:
+                                # Technically `_settings.language` could be a raw string, but
+                                # Language is a StrEnum so downstream handles either.
+                                language = cast(
+                                    "Language | None", assert_given(self._settings.language)
+                                )
                                 if is_final:
                                     await self.push_frame(
                                         TranscriptionFrame(
                                             transcript,
                                             self._user_id,
                                             time_now_iso8601(),
-                                            self._settings.language,
+                                            language,
                                             result=result,
                                         )
                                     )
                                     await self._handle_transcription(
                                         transcript,
                                         is_final,
-                                        self._settings.language,
+                                        language,
                                     )
                                     await self.stop_processing_metrics()
                                 else:
@@ -556,7 +562,7 @@ class AWSTranscribeSTTService(WebsocketSTTService):
                                             transcript,
                                             self._user_id,
                                             time_now_iso8601(),
-                                            self._settings.language,
+                                            language,
                                             result=result,
                                         )
                                     )

@@ -16,10 +16,13 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import (
     Any,
+    Generic,
     Protocol,
+    cast,
 )
 
 from loguru import logger
+from typing_extensions import TypeVar
 from websockets.exceptions import ConnectionClosed
 from websockets.protocol import State
 
@@ -53,7 +56,7 @@ from pipecat.processors.aggregators.llm_context import (
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.ai_service import AIService
-from pipecat.services.settings import LLMSettings
+from pipecat.services.settings import LLMSettings, assert_given
 from pipecat.services.websocket_service import WebsocketService
 from pipecat.turns.user_turn_completion_mixin import UserTurnCompletionLLMServiceMixin
 from pipecat.utils.async_tool_cancellation import (
@@ -107,14 +110,42 @@ class FunctionCallParams:
             For async function calls (``cancel_on_interruption=False``), call
             it with ``properties=FunctionCallResultProperties(is_final=False)``
             to push intermediate updates before the final result.
+        app_resources: The application-defined resources passed to
+            ``PipelineTask(..., app_resources=...)``. Same object — passed by
+            reference, not a copy. Use it to share DB handles, clients, state,
+            feature flags, etc. across all of a session's tool handlers.
     """
 
     function_name: str
     tool_call_id: str
     arguments: Mapping[str, Any]
-    llm: LLMService
+    # `LLMService[Any]` so any concrete subclass (regardless of how — or
+    # whether — it parameterizes the adapter type) can be assigned here.
+    # Plain `LLMService` would invoke the TypeVar default and pyright would
+    # treat it invariantly, rejecting `LLMService[XAdapter]` at the call
+    # sites that build FunctionCallParams.
+    llm: LLMService[Any]
     context: LLMContext
     result_callback: FunctionCallResultCallback
+    app_resources: Any = None
+
+    @property
+    def tool_resources(self) -> Any:
+        """Deprecated alias for :attr:`app_resources`.
+
+        .. deprecated:: 1.2.0
+            Use :attr:`app_resources` instead. ``tool_resources`` will be
+            removed in a future version.
+        """
+        with warnings.catch_warnings():
+            warnings.simplefilter("always")
+            warnings.warn(
+                "`FunctionCallParams.tool_resources` is deprecated since 1.2.0, "
+                "use `app_resources` instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        return self.app_resources
 
 
 @dataclass
@@ -167,7 +198,14 @@ class FunctionCallRunnerItem:
     group_id: str | None = None
 
 
-class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
+# `default=BaseLLMAdapter` (PEP 696) so that unparameterized subclasses
+# (e.g. third-party `class MyService(LLMService):` with no bracket) get
+# `TAdapter = BaseLLMAdapter` instead of `Unknown` at type-check time —
+# matching the pre-generic behavior of `get_llm_adapter()`.
+TAdapter = TypeVar("TAdapter", bound=BaseLLMAdapter, default=BaseLLMAdapter)
+
+
+class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]):
     """Base class for all LLM services.
 
     Handles function calling registration and execution with support for both
@@ -199,6 +237,7 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
     """
 
     _settings: LLMSettings
+    _adapter: TAdapter
 
     # OpenAILLMAdapter is used as the default adapter since it aligns with most LLM implementations.
     # However, subclasses should override this with a more specific adapter when necessary.
@@ -246,7 +285,12 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
         self._filter_incomplete_user_turns: bool = False
         self._async_tool_cancellation_enabled: bool = False
         self._base_system_instruction: str | None = None
-        self._adapter = self.adapter_class()
+        # `adapter_class` is typed as `type[BaseLLMAdapter]` so subclasses
+        # don't need to spell out the generic parameter just to subclass
+        # (backward compatibility for 3rd-party providers outside this repo).
+        # Cast to TAdapter to keep `_adapter` and `get_llm_adapter()` precisely
+        # typed for callers that opt into `LLMService[XAdapter]`.
+        self._adapter = cast(TAdapter, self.adapter_class())
         self._functions: dict[str | None, FunctionCallRegistryItem] = {}
         self._function_call_tasks: dict[asyncio.Task | None, FunctionCallRunnerItem] = {}
         self._sequential_runner_task: asyncio.Task | None = None
@@ -257,7 +301,7 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
         self._register_event_handler("on_function_calls_cancelled")
         self._register_event_handler("on_completion_timeout")
 
-    def get_llm_adapter(self) -> BaseLLMAdapter:
+    def get_llm_adapter(self) -> TAdapter:
         """Get the LLM adapter instance.
 
         Returns:
@@ -378,7 +422,9 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
                 self._base_system_instruction = None
 
         if "user_turn_completion_config" in changed and self._filter_incomplete_user_turns:
-            self.set_user_turn_completion_config(self._settings.user_turn_completion_config)
+            self.set_user_turn_completion_config(
+                assert_given(self._settings.user_turn_completion_config)
+            )
             self._compose_system_instruction()
 
         if (
@@ -721,7 +767,7 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
                 logger.warning(
                     f"{self} is calling '{function_call.function_name}', but it's not registered."
                 )
-                continue
+                item = self._build_missing_function_call_registry_item(function_call.function_name)
 
             runner_items.append(
                 FunctionCallRunnerItem(
@@ -778,12 +824,21 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
             await self._sequential_runner_queue.put(runner_item)
 
     async def _run_function_call(self, runner_item: FunctionCallRunnerItem):
+        # Re-resolve the registry item at execution time. The function may have
+        # been unregistered between queuing and execution, in which case we
+        # fall back to the missing-function handler so the call still terminates
+        # with a normal tool result.
         if runner_item.function_name in self._functions.keys():
             item = self._functions[runner_item.function_name]
         elif None in self._functions.keys():
             item = self._functions[None]
+        elif runner_item.registry_item.handler == self._missing_function_call_handler:
+            item = runner_item.registry_item
         else:
-            return
+            logger.warning(
+                f"{self} is calling '{runner_item.function_name}', but it was just unregistered."
+            )
+            item = self._build_missing_function_call_registry_item(runner_item.function_name)
 
         logger.debug(
             f"{self} Calling function [{runner_item.function_name}:{runner_item.tool_call_id}] with arguments {runner_item.arguments}"
@@ -857,6 +912,9 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
         # it starts would leave the coroutine in a "never awaited" state.
         await asyncio.sleep(0)
 
+        # _pipeline_task may be unset when the service is driven without a PipelineTask.
+        app_resources = self._pipeline_task.app_resources if self._pipeline_task else None
+
         try:
             if isinstance(item.handler, DirectFunctionWrapper):
                 # Handler is a DirectFunctionWrapper
@@ -869,6 +927,7 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
                         llm=self,
                         context=runner_item.context,
                         result_callback=function_call_result_callback,
+                        app_resources=app_resources,
                     ),
                 )
             else:
@@ -880,6 +939,7 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
                     llm=self,
                     context=runner_item.context,
                     result_callback=function_call_result_callback,
+                    app_resources=app_resources,
                 )
                 await item.handler(params)
         except Exception as e:
@@ -889,6 +949,20 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService):
         finally:
             if timeout_task and not timeout_task.done():
                 await self.cancel_task(timeout_task)
+
+    def _build_missing_function_call_registry_item(
+        self, function_name: str
+    ) -> FunctionCallRegistryItem:
+        """Build a registry item that routes to the missing-function handler."""
+        return FunctionCallRegistryItem(
+            function_name=function_name,
+            handler=self._missing_function_call_handler,
+            cancel_on_interruption=True,
+        )
+
+    async def _missing_function_call_handler(self, params: FunctionCallParams):
+        """Return a terminal tool result when the LLM calls an unknown function."""
+        await params.result_callback(f"Error: function '{params.function_name}' is not registered.")
 
     def _has_async_tools(self) -> bool:
         """Return True if at least one non-builtin async tool is registered."""
@@ -1059,7 +1133,7 @@ class WebsocketReconnectedError(Exception):
     pass
 
 
-class WebsocketLLMService(LLMService, WebsocketService):
+class WebsocketLLMService(LLMService[TAdapter], WebsocketService, Generic[TAdapter]):
     """Base class for websocket-based LLM services.
 
     Each LLM inference is a discrete request/response exchange: send one
@@ -1107,7 +1181,11 @@ class WebsocketLLMService(LLMService, WebsocketService):
             reconnect_on_error: Whether to automatically reconnect on websocket errors.
             **kwargs: Additional arguments passed to parent classes.
         """
-        LLMService.__init__(self, **kwargs)
+        # pyright stumbles here because the TypeVar default makes
+        # `LLMService` resolve to `LLMService[BaseLLMAdapter]` invariantly,
+        # while `self` is `WebsocketLLMService[TAdapter]` for an arbitrary
+        # TAdapter. The runtime call is fine — generics are erased.
+        LLMService.__init__(self, **kwargs)  # pyright: ignore[reportArgumentType]
         WebsocketService.__init__(self, reconnect_on_error=reconnect_on_error, **kwargs)
         self._register_event_handler("on_connection_error")
 
@@ -1187,6 +1265,11 @@ class WebsocketLLMService(LLMService, WebsocketService):
         Returns:
             The parsed JSON message as a dict.
         """
+        # Should never happen — `_ensure_connected` (which callers must invoke
+        # first) raises ConnectionError if it can't establish a websocket.
+        # Match that contract here.
+        if self._websocket is None:
+            raise ConnectionError(f"{self} _ws_recv called without a websocket")
         try:
             raw = await self._websocket.recv()
             return json.loads(raw)

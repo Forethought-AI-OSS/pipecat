@@ -39,7 +39,7 @@ from pipecat.services.gladia.config import (
     PreProcessingConfig,
     RealtimeProcessingConfig,
 )
-from pipecat.services.settings import NOT_GIVEN, STTSettings, _NotGiven
+from pipecat.services.settings import NOT_GIVEN, STTSettings, _NotGiven, assert_given
 from pipecat.services.stt_latency import GLADIA_TTFS_P99
 from pipecat.services.stt_service import WebsocketSTTService
 from pipecat.transcriptions.language import Language, resolve_language
@@ -56,14 +56,17 @@ except ModuleNotFoundError as e:
     raise Exception(f"Missing module: {e}")
 
 
-def language_to_gladia_language(language: Language) -> str | None:
+def language_to_gladia_language(language: Language) -> str:
     """Convert a Language enum to Gladia's language code format.
 
     Args:
         language: The Language enum value to convert.
 
     Returns:
-        The Gladia language code string or None if not supported.
+        The corresponding Gladia language code. If ``language`` is not in
+        the verified mapping, falls back to the base language code (e.g.,
+        ``en`` from ``en-US``) and logs a warning (via
+        ``resolve_language(..., use_base_code=True)``).
     """
     LANGUAGE_MAP = {
         Language.AF: "af",
@@ -361,7 +364,7 @@ class GladiaSTTService(WebsocketSTTService):
             language: The Language enum value to convert.
 
         Returns:
-            The Gladia language code string or None if not supported.
+            The Gladia language code string, or None if not supported.
         """
         return language_to_gladia_language(language)
 
@@ -377,7 +380,7 @@ class GladiaSTTService(WebsocketSTTService):
         }
 
         # Add custom_metadata if provided
-        settings["custom_metadata"] = dict(s.custom_metadata or {})
+        settings["custom_metadata"] = dict(assert_given(s.custom_metadata) or {})
         settings["custom_metadata"]["pipecat"] = pipecat_version()
 
         # Add endpointing parameters if provided
@@ -389,20 +392,24 @@ class GladiaSTTService(WebsocketSTTService):
             )
 
         # Add language configuration
-        if s.language_config:
-            settings["language_config"] = s.language_config.model_dump(exclude_none=True)
+        language_config = assert_given(s.language_config)
+        if language_config:
+            settings["language_config"] = language_config.model_dump(exclude_none=True)
 
         # Add pre_processing configuration if provided
-        if s.pre_processing:
-            settings["pre_processing"] = s.pre_processing.model_dump(exclude_none=True)
+        pre_processing = assert_given(s.pre_processing)
+        if pre_processing:
+            settings["pre_processing"] = pre_processing.model_dump(exclude_none=True)
 
         # Add realtime_processing configuration if provided
-        if s.realtime_processing:
-            settings["realtime_processing"] = s.realtime_processing.model_dump(exclude_none=True)
+        realtime_processing = assert_given(s.realtime_processing)
+        if realtime_processing:
+            settings["realtime_processing"] = realtime_processing.model_dump(exclude_none=True)
 
         # Add messages_config if provided
-        if s.messages_config:
-            settings["messages_config"] = s.messages_config.model_dump(exclude_none=True)
+        messages_config = assert_given(s.messages_config)
+        if messages_config:
+            settings["messages_config"] = messages_config.model_dump(exclude_none=True)
 
         return settings
 
@@ -535,6 +542,8 @@ class GladiaSTTService(WebsocketSTTService):
 
             logger.debug(f"{self}Connecting to Gladia WebSocket")
 
+            if self._session_url is None:
+                raise RuntimeError(f"{self} session URL is not initialized")
             self._websocket = await websocket_connect(self._session_url)
             self._connection_active = True
 

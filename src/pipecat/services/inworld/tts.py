@@ -72,8 +72,8 @@ class InworldTTSSettings(TTSSettings):
         temperature: Temperature for speech synthesis.
     """
 
-    speaking_rate: float | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    temperature: float | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    speaking_rate: float | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    temperature: float | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
 
     _aliases: ClassVar[dict[str, str]] = {
         "voiceId": "voice",
@@ -794,8 +794,10 @@ class InworldTTSService(WebsocketTTSService):
 
         return word_times
 
-    async def _close_context(self, context_id: str):
-        if context_id and self._websocket:
+    async def _close_context(self, context_id: str | None):
+        if not context_id:
+            return
+        if self._websocket:
             logger.info(f"{self}: Closing context {context_id} due to interruption or completion")
             try:
                 await self._send_close_context(context_id)

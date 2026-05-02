@@ -90,6 +90,18 @@ class BaseOutputTransport(FrameProcessor):
         # it.
         self._media_senders: dict[Any, BaseOutputTransport.MediaSender] = {}
 
+        if params.video_out_bitrate is not None:
+            import warnings
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("always")
+                warnings.warn(
+                    "Transport parameter `video_out_bitrate` is deprecated and will be removed in a future "
+                    "version. Use provider specific settings instead.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+
     @property
     def sample_rate(self) -> int:
         """Get the current audio sample rate.
@@ -759,13 +771,16 @@ class BaseOutputTransport(FrameProcessor):
                         await self._bot_stopped_speaking()
 
             async def with_mixer(vad_stop_secs: float) -> AsyncGenerator[Frame, None]:
+                # Caller below only invokes this when `self._mixer` is set.
+                mixer = self._mixer
+                assert mixer is not None
                 last_frame_time = 0
                 silence = b"\x00" * self._audio_chunk_size
                 while True:
                     try:
                         frame = self._audio_queue.get_nowait()
                         if isinstance(frame, OutputAudioRawFrame):
-                            frame.audio = await self._mixer.mix(frame.audio)
+                            frame.audio = await mixer.mix(frame.audio)
                             last_frame_time = time.time()
                         yield frame
                         self._audio_queue.task_done()
@@ -776,7 +791,7 @@ class BaseOutputTransport(FrameProcessor):
                             await self._bot_stopped_speaking()
                         # Generate an audio frame with only the mixer's part.
                         frame = OutputAudioRawFrame(
-                            audio=await self._mixer.mix(silence),
+                            audio=await mixer.mix(silence),
                             sample_rate=self._sample_rate,
                             num_channels=self._params.audio_out_channels,
                         )
@@ -915,6 +930,11 @@ class BaseOutputTransport(FrameProcessor):
             """
 
             def resize_frame(frame: OutputImageRawFrame) -> OutputImageRawFrame:
+                # Without a format we can't decode the bytes, so leave the
+                # frame as-is and let the transport pass it through unchanged.
+                if frame.format is None:
+                    return frame
+
                 desired_size = (self._params.video_out_width, self._params.video_out_height)
 
                 # TODO: we should refactor in the future to support dynamic resolutions
