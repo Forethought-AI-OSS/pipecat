@@ -20,14 +20,14 @@ from typing import (
     Literal,
 )
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from pipecat.frames.frames import (
     AggregationType,
 )
 
 # -- Constants --
-PROTOCOL_VERSION = "1.2.0"
+PROTOCOL_VERSION = "1.4.0"
 
 MESSAGE_LABEL = "rtvi-ai"
 MessageLiteral = Literal["rtvi-ai"]
@@ -549,3 +549,473 @@ class SystemLogMessage(BaseModel):
     label: MessageLiteral = MESSAGE_LABEL
     type: Literal["system-log"] = "system-log"
     data: TextMessageData
+
+
+# -- UI Worker Protocol ------------------------------------------------------
+#
+# A structured RTVI message vocabulary that lets server-side workers
+# observe and drive a GUI app on the client side. The protocol covers
+# five first-class RTVI message types:
+#
+#   ui-event         client-to-server event message
+#   ui-command       server-to-client command message
+#   ui-snapshot      client-to-server accessibility snapshot
+#   ui-cancel-job-group   client-to-server cancellation request
+#   ui-job-group          server-to-client job-group lifecycle envelope
+#
+# This section is data only (constants and payload models, no
+# behavior). ``pipecat.workers.ui.UIWorker`` builds the higher-level
+# abstractions on top, and single-LLM Pipecat apps can target the same
+# wire format directly via custom tools that emit typed RTVI messages
+# with these types. The matching client-side implementation lives in
+# ``@pipecat-ai/client-js`` and ``@pipecat-ai/client-react``.
+
+# The wire-format ``type`` strings (``"ui-event"``, ``"ui-command"``,
+# ``"ui-snapshot"``, ``"ui-cancel-job-group"``, ``"ui-job-group"``) are pinned
+# as ``Literal[...]`` field defaults on the corresponding ``*Message``
+# pydantic class below, matching the convention used for every other
+# RTVI message type in this module.
+
+# Each ``ui-job-group`` envelope carries a ``kind`` field that the client's
+# reducer dispatches on. The four kinds form the lifecycle of a
+# user-facing job group:
+#
+#   group_started → job_update* → job_completed × N → group_completed
+#
+# where N is the number of workers in the group. The kind strings are
+# pinned as ``Literal[...]`` defaults on the matching ``UIJob*Data``
+# class below.
+
+
+# -- UI envelope data classes --
+
+
+class UIEventData(BaseModel):
+    """Inner ``data`` for a ``ui-event`` message.
+
+    Parameters:
+        event: App-defined event.
+        payload: App-defined payload, schemaless by design.
+    """
+
+    event: str
+    payload: Any | None = None
+
+
+class UICommandData(BaseModel):
+    """Inner ``data`` for a ``ui-command`` message.
+
+    Parameters:
+        command: App-defined command.
+        payload: App-defined payload (already a plain dict by the
+            time it lands on the wire). The standard command payload models
+            below produce the right shape via ``model_dump()``.
+    """
+
+    command: str
+    payload: Any | None = None
+
+
+class A11yNode(BaseModel):
+    """One node in the UI accessibility snapshot tree.
+
+    Mirrors the client-side ``A11yNode`` wire shape. Extra fields are
+    allowed so clients can add platform-specific or future metadata
+    without breaking older servers.
+
+    Parameters:
+        ref: Stable client-assigned element reference.
+        role: ARIA-style role for the node.
+        name: Optional accessible name.
+        value: Optional current value for inputs/progress/etc.
+        state: Optional short state tags (e.g. ``"focused"``,
+            ``"disabled"``, ``"offscreen"``).
+        level: Optional heading level.
+        colcount: Optional column count for grid-like containers.
+        rowcount: Optional row count for grid-like containers.
+        children: Optional child nodes.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    ref: str
+    role: str
+    name: str | None = None
+    value: str | None = None
+    state: list[str] | None = None
+    level: int | None = None
+    colcount: int | None = None
+    rowcount: int | None = None
+    children: list["A11yNode"] | None = None
+
+
+class A11ySelection(BaseModel):
+    """The user's current text selection in the UI snapshot.
+
+    Extra fields are allowed for forward compatibility with client
+    snapshot additions.
+
+    Parameters:
+        ref: Ref of the element that carries the selection.
+        text: Selected text.
+        start_offset: Optional selection start offset.
+        end_offset: Optional selection end offset.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    ref: str
+    text: str
+    start_offset: int | None = None
+    end_offset: int | None = None
+
+
+class A11ySnapshot(BaseModel):
+    """Client accessibility snapshot sent in a ``ui-snapshot`` message.
+
+    Mirrors the client-side ``A11ySnapshot`` wire shape. Extra fields
+    are allowed so clients can add compatible metadata over time.
+
+    Parameters:
+        root: Root accessibility node.
+        captured_at: Client-side epoch milliseconds when captured.
+        selection: Optional current text selection.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    root: A11yNode
+    captured_at: int
+    selection: A11ySelection | None = None
+
+
+class UISnapshotData(BaseModel):
+    """Inner ``data`` for a ``ui-snapshot`` message.
+
+    The accessibility snapshot tree mirrors the client-side
+    ``A11ySnapshot`` wire shape and is kept forward-compatible by
+    allowing extra fields on the snapshot models.
+
+    Parameters:
+        tree: The serialized accessibility tree.
+    """
+
+    tree: A11ySnapshot
+
+
+class UICancelJobGroupData(BaseModel):
+    """Inner ``data`` for a ``ui-cancel-job-group`` message.
+
+    Parameters:
+        job_id: The job group id the client wants cancelled.
+        reason: Optional human-readable reason.
+    """
+
+    job_id: str
+    reason: str | None = None
+
+
+class UIJobGroupStartedData(BaseModel):
+    """``data`` for a ``ui-job-group`` envelope with kind ``group_started``.
+
+    Parameters:
+        kind: Always ``"group_started"``.
+        job_id: Shared job-group identifier for the group.
+        workers: Names of the workers the work was dispatched to.
+        label: Optional human-readable label for the group.
+        cancellable: Whether the client may request cancellation.
+        at: Epoch milliseconds when the group started.
+    """
+
+    kind: Literal["group_started"] = "group_started"
+    job_id: str
+    workers: list[str] | None = None
+    label: str | None = None
+    cancellable: bool = True
+    at: int = 0
+
+
+class UIJobUpdateData(BaseModel):
+    """``data`` for a ``ui-job-group`` envelope with kind ``job_update``.
+
+    Parameters:
+        kind: Always ``"job_update"``.
+        job_id: The shared job-group identifier.
+        worker_name: The worker that produced the update.
+        data: The worker's update payload, forwarded verbatim.
+        at: Epoch milliseconds when the update was emitted.
+    """
+
+    kind: Literal["job_update"] = "job_update"
+    job_id: str
+    worker_name: str
+    data: Any | None = None
+    at: int = 0
+
+
+class UIJobCompletedData(BaseModel):
+    """``data`` for a ``ui-job-group`` envelope with kind ``job_completed``.
+
+    Parameters:
+        kind: Always ``"job_completed"``.
+        job_id: The shared job-group identifier.
+        worker_name: The worker that produced the response.
+        status: Completion status string.
+        response: The worker's response payload.
+        at: Epoch milliseconds when the response was received.
+    """
+
+    kind: Literal["job_completed"] = "job_completed"
+    job_id: str
+    worker_name: str
+    status: str
+    response: Any | None = None
+    at: int = 0
+
+
+class UIJobGroupCompletedData(BaseModel):
+    """``data`` for a ``ui-job-group`` envelope with kind ``group_completed``.
+
+    Parameters:
+        kind: Always ``"group_completed"``.
+        job_id: The shared job-group identifier.
+        at: Epoch milliseconds when the group completed.
+    """
+
+    kind: Literal["group_completed"] = "group_completed"
+    job_id: str
+    at: int = 0
+
+
+#: Discriminated union over the four job-group lifecycle data shapes,
+#: keyed by the ``kind`` field.
+UIJobGroupData = (
+    UIJobGroupStartedData | UIJobUpdateData | UIJobCompletedData | UIJobGroupCompletedData
+)
+
+
+# -- UI envelope message classes --
+
+
+class UIEventMessage(BaseModel):
+    """RTVI ``ui-event`` message (client → server)."""
+
+    label: MessageLiteral = MESSAGE_LABEL
+    type: Literal["ui-event"] = "ui-event"
+    id: str
+    data: UIEventData
+
+
+class UICommandMessage(BaseModel):
+    """RTVI ``ui-command`` message (server → client)."""
+
+    label: MessageLiteral = MESSAGE_LABEL
+    type: Literal["ui-command"] = "ui-command"
+    data: UICommandData
+
+
+class UISnapshotMessage(BaseModel):
+    """RTVI ``ui-snapshot`` message (client → server)."""
+
+    label: MessageLiteral = MESSAGE_LABEL
+    type: Literal["ui-snapshot"] = "ui-snapshot"
+    id: str
+    data: UISnapshotData
+
+
+class UICancelJobGroupMessage(BaseModel):
+    """RTVI ``ui-cancel-job-group`` message (client → server)."""
+
+    label: MessageLiteral = MESSAGE_LABEL
+    type: Literal["ui-cancel-job-group"] = "ui-cancel-job-group"
+    id: str
+    data: UICancelJobGroupData
+
+
+class UIJobGroupMessage(BaseModel):
+    """RTVI ``ui-job-group`` message (server → client).
+
+    The ``data`` field is one of the four job-group lifecycle
+    discriminated by the ``kind`` field.
+    """
+
+    label: MessageLiteral = MESSAGE_LABEL
+    type: Literal["ui-job-group"] = "ui-job-group"
+    data: UIJobGroupData
+
+
+# -- UI command payloads --
+#
+# These models describe commands that have matching default React
+# handlers in ``@pipecat-ai/client-react``'s ``standardHandlers``.
+# Apps can use them as-is, override the client handler to customize
+# rendering, or ignore them entirely and define their own command
+# names.
+#
+# Server-side helpers that send commands accept these models directly.
+# ``BaseModel.model_dump()`` converts them to the plain-dict shape
+# that travels over the wire.
+
+
+class Toast(BaseModel):
+    """A transient notification surface shown on the client.
+
+    Parameters:
+        title: Required headline.
+        subtitle: Optional second line beneath the title.
+        description: Optional body text.
+        image_url: Optional leading image.
+        duration_ms: Optional dismiss timer. Client default applies
+            when None.
+    """
+
+    title: str
+    subtitle: str | None = None
+    description: str | None = None
+    image_url: str | None = None
+    duration_ms: int | None = None
+
+
+class Navigate(BaseModel):
+    """Client-side navigation to a named view.
+
+    Parameters:
+        view: App-defined view name (route, screen id, tab key, etc.).
+        params: Optional view-specific parameters.
+    """
+
+    view: str
+    params: dict | None = None
+
+
+class ScrollTo(BaseModel):
+    """Scroll a target element into view.
+
+    The client resolves the target by ``ref`` first (a snapshot ref
+    like ``"e42"`` assigned by the a11y walker), then falls back to
+    ``target_id`` (``document.getElementById``). Supply whichever you
+    have; ``ref`` is the normal choice when acting on a node from
+    ``<ui_state>``.
+
+    Parameters:
+        ref: Snapshot ref from ``<ui_state>``.
+        target_id: Element id registered on the client.
+        behavior: Optional scroll behavior hint. Typical values:
+            ``"smooth"`` or ``"instant"``. Clients may ignore.
+    """
+
+    ref: str | None = None
+    target_id: str | None = None
+    behavior: str | None = None
+
+
+class Highlight(BaseModel):
+    """Briefly emphasize a target element (flash, glow, pulse).
+
+    Parameters:
+        ref: Snapshot ref from ``<ui_state>``.
+        target_id: Element id registered on the client.
+        duration_ms: Optional highlight duration. Client default
+            applies when None.
+    """
+
+    ref: str | None = None
+    target_id: str | None = None
+    duration_ms: int | None = None
+
+
+class Focus(BaseModel):
+    """Move input focus to a target element.
+
+    Parameters:
+        ref: Snapshot ref from ``<ui_state>``.
+        target_id: Element id registered on the client.
+    """
+
+    ref: str | None = None
+    target_id: str | None = None
+
+
+class Click(BaseModel):
+    """Click an element on the client.
+
+    Closes the form-fill loop for non-text inputs (checkboxes, radios)
+    and exposes the rest of the action vocabulary (submit buttons,
+    links, app-specific clickable nodes). The standard handler
+    silently no-ops on ``disabled`` targets so the worker can't bypass
+    UI affordances the user is meant to control.
+
+    For native ``<select>``, prefer ``SetInputValue`` (clicking
+    options doesn't reliably change the selection); for custom
+    comboboxes (ARIA listbox + popup), apps wire their own command
+    matching the library's interaction model.
+
+    Parameters:
+        ref: Snapshot ref from ``<ui_state>``.
+        target_id: Element id registered on the client. Used as a
+            fallback when ``ref`` is not set or has gone stale.
+    """
+
+    ref: str | None = None
+    target_id: str | None = None
+
+
+class SetInputValue(BaseModel):
+    """Write a value into a text input or textarea on the client.
+
+    Use this for form-filling: the worker has decided what should go
+    into a field (clarifying answer, tax form entry, etc.) and asks
+    the client to populate it. With ``replace=True`` (the default),
+    the existing value is overwritten; with ``replace=False`` the
+    value is appended.
+
+    The standard handler silently no-ops on ``disabled``, ``readonly``,
+    and ``<input type="hidden">`` targets so the worker can't write
+    into fields the user can't.
+
+    Parameters:
+        value: The text to write.
+        ref: Snapshot ref from ``<ui_state>``. Typically the ref of
+            an ``<input>`` or ``<textarea>``.
+        target_id: Element id registered on the client. Used as a
+            fallback when ``ref`` is not set or has gone stale.
+        replace: When True (the default), overwrite the current
+            value. When False, append to it.
+    """
+
+    value: str = ""
+    ref: str | None = None
+    target_id: str | None = None
+    replace: bool = True
+
+
+class SelectText(BaseModel):
+    """Select text on the page so the user can see what the worker means.
+
+    Mirror of the ``selection`` field surfaced in the snapshot. Use
+    this to point the user's attention at a specific paragraph or
+    range after the worker has decided what it's referring to.
+
+    With ``start_offset`` and ``end_offset`` omitted, the entire
+    target's text content is selected (``Range.selectNodeContents``
+    for document elements; ``el.select()`` for ``<input>`` /
+    ``<textarea>``).
+
+    Parameters:
+        ref: Snapshot ref from ``<ui_state>``. Typically the ref of
+            a paragraph or input element.
+        target_id: Element id registered on the client. Used as a
+            fallback when ``ref`` is not set or has gone stale.
+        start_offset: Character offset within the target's text
+            where the selection should start. For ``<input>`` and
+            ``<textarea>`` this is the value offset; for document
+            elements it is computed against the concatenation of
+            descendant text nodes in document order.
+        end_offset: End character offset, exclusive. Same coordinate
+            system as ``start_offset``.
+    """
+
+    ref: str | None = None
+    target_id: str | None = None
+    start_offset: int | None = None
+    end_offset: int | None = None

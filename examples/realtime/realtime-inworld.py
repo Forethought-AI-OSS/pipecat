@@ -28,17 +28,20 @@ Usage:
 """
 
 import os
+import random
+from datetime import datetime
 
 from dotenv import load_dotenv
 from loguru import logger
 
+from pipecat.adapters.schemas.function_schema import FunctionSchema
+from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.observers.loggers.transcription_log_observer import (
     TranscriptionLogObserver,
 )
 from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     AssistantTurnStoppedMessage,
@@ -48,11 +51,50 @@ from pipecat.processors.aggregators.llm_response_universal import (
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
 from pipecat.services.inworld.realtime.llm import InworldRealtimeLLMService
+from pipecat.services.llm_service import FunctionCallParams
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
+from pipecat.workers.runner import WorkerRunner
 
 load_dotenv(override=True)
+
+
+async def fetch_weather_from_api(params: FunctionCallParams):
+    temperature = (
+        random.randint(60, 85)
+        if params.arguments["format"] == "fahrenheit"
+        else random.randint(15, 30)
+    )
+    await params.result_callback(
+        {
+            "conditions": "nice",
+            "temperature": temperature,
+            "location": params.arguments["location"],
+            "format": params.arguments["format"],
+            "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
+        }
+    )
+
+
+weather_function = FunctionSchema(
+    name="get_current_weather",
+    description="Get the current weather",
+    properties={
+        "location": {
+            "type": "string",
+            "description": "The city and state, e.g. San Francisco, CA",
+        },
+        "format": {
+            "type": "string",
+            "enum": ["celsius", "fahrenheit"],
+            "description": "The temperature unit to use. Infer this from the users location.",
+        },
+    },
+    required=["location", "format"],
+)
+
+tools = ToolsSchema(standard_tools=[weather_function])
 
 
 # --- Transport Configuration ---
@@ -85,7 +127,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     # See: https://docs.inworld.ai/router/introduction
     llm = InworldRealtimeLLMService(
         api_key=os.environ["INWORLD_API_KEY"],
-        llm_model="xai/grok-4-1-fast-non-reasoning",
+        llm_model="google-ai-studio/gemini-3.1-flash-lite",
         voice="Sarah",
         settings=InworldRealtimeLLMService.Settings(
             system_instruction="""You are a helpful and friendly AI assistant powered by Inworld.
@@ -97,9 +139,14 @@ Always be helpful and proactive in offering assistance.""",
         ),
     )
 
-    # Create context with initial message
+    # Note: function calling requires a paid Inworld account and a
+    # function-calling-capable model
+    llm.register_function("get_current_weather", fetch_weather_from_api)
+
+    # Create context with initial message + tools
     context = LLMContext(
         [{"role": "developer", "content": "Say hello and introduce yourself!"}],
+        tools,
     )
 
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(context)
@@ -115,7 +162,7 @@ Always be helpful and proactive in offering assistance.""",
         ]
     )
 
-    task = PipelineTask(
+    worker = PipelineWorker(
         pipeline,
         params=PipelineParams(
             enable_metrics=True,
@@ -128,12 +175,12 @@ Always be helpful and proactive in offering assistance.""",
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
         logger.info("Client connected")
-        await task.queue_frames([LLMRunFrame()])
+        await worker.queue_frames([LLMRunFrame()])
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
         logger.info("Client disconnected")
-        await task.cancel()
+        await worker.cancel()
 
     @user_aggregator.event_handler("on_user_turn_stopped")
     async def on_user_turn_stopped(aggregator, strategy, message: UserTurnStoppedMessage):
@@ -145,9 +192,10 @@ Always be helpful and proactive in offering assistance.""",
         timestamp = f"[{message.timestamp}] " if message.timestamp else ""
         logger.info(f"Transcript: {timestamp}assistant: {message.content}")
 
-    runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
+    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
 
-    await runner.run(task)
+    await runner.add_workers(worker)
+    await runner.run()
 
 
 async def bot(runner_args: RunnerArguments):

@@ -56,7 +56,7 @@ try:
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error("In order to use ElevenLabs, you need to `pip install pipecat-ai[elevenlabs]`.")
-    raise Exception(f"Missing module: {e}")
+    raise ImportError(f"Missing module: {e}") from e
 
 # Models that support language codes
 # The following models are excluded as they don't support language codes:
@@ -147,6 +147,17 @@ def output_format_from_sample_rate(sample_rate: int) -> str:
         f"ElevenLabsTTSService: No output format available for {sample_rate} sample rate"
     )
     return "pcm_24000"
+
+
+def _is_chinese_or_japanese_language(language: str) -> bool:
+    """Check if the given language is Chinese or Japanese."""
+    base_lang = language.split("-")[0].lower()
+    return base_lang in {"zh", "ja"}
+
+
+def _word_timestamps_include_inter_frame_spaces(language: str | None) -> bool:
+    """Whether timestamp text should be treated as carrying its own spacing."""
+    return bool(language and _is_chinese_or_japanese_language(language))
 
 
 def build_elevenlabs_voice_settings(
@@ -246,6 +257,79 @@ class ElevenLabsHttpTTSSettings(TTSSettings):
     apply_text_normalization: Literal["auto", "on", "off"] | None | _NotGiven = field(
         default_factory=lambda: NOT_GIVEN
     )
+
+
+def _select_alignment(
+    msg: Mapping[str, Any],
+    *,
+    normalized_key: str,
+    alignment_key: str,
+    prefer_normalized: bool,
+) -> Mapping[str, Any] | None:
+    """Pick the alignment field to use from a TTS message, with fallback.
+
+    ElevenLabs returns two alignment fields per chunk:
+
+    - ``normalized_key`` (``normalizedAlignment`` for WebSocket,
+      ``normalized_alignment`` for HTTP): the post-normalized form of what was
+      spoken - pronunciation-dictionary substitutions, text normalization, or
+      romanization of non-Latin scripts (e.g., Chinese rendered as pinyin).
+    - ``alignment_key`` (``alignment``): the original input characters.
+
+    Prefer ``normalized`` only when a pronunciation dictionary is configured -
+    that's the case where ``alignment`` has overlapping restarts that produce
+    duplicated/garbled words (issue #4316). Otherwise prefer ``alignment`` so
+    the LLM context preserves the original input rather than the normalized
+    form. Fall back to the other field if the preferred one is missing or
+    null - the API schema marks both as nullable.
+
+    Args:
+        msg: TTS response message from ElevenLabs.
+        normalized_key: Key for the normalized-alignment field on this transport.
+        alignment_key: Key for the original-alignment field on this transport.
+        prefer_normalized: True iff the caller is using pronunciation dictionaries.
+
+    Returns:
+        The chosen alignment dict, or ``None`` if both fields are absent/null.
+    """
+    if prefer_normalized:
+        return msg.get(normalized_key) or msg.get(alignment_key)
+    return msg.get(alignment_key) or msg.get(normalized_key)
+
+
+def _strip_utterance_leading_spaces(
+    alignment: Mapping[str, Any], keys: tuple[str, str, str], should_strip: bool
+) -> Mapping[str, Any]:
+    """Return alignment with utterance-leading space chars removed, if requested.
+
+    ElevenLabs Flash normalized alignment chunks can begin with a leading space
+    at the start of an utterance. Strip only utterance-leading spaces so bot
+    turn text does not start with whitespace. On subsequent chunks, however, a
+    leading space can be a real inter-word separator (Flash models commonly
+    split sentences this way), so it must be preserved for
+    ``calculate_word_times`` to flush any partial word carried over from the
+    previous chunk.
+
+    Args:
+        alignment: Alignment dict from the API.
+        keys: Tuple of (chars_key, start_times_key, durations_or_end_times_key)
+            naming the three parallel arrays - these differ between the
+            WebSocket and HTTP response schemas.
+        should_strip: Whether this is still utterance-leading alignment data.
+    """
+    chars_key, starts_key, tail_key = keys
+    chars = alignment.get(chars_key) or []
+    if should_strip and chars and chars[0] == " ":
+        strip_count = 0
+        while strip_count < len(chars) and chars[strip_count] == " ":
+            strip_count += 1
+
+        stripped = dict(alignment)
+        stripped[chars_key] = chars[strip_count:]
+        stripped[starts_key] = alignment.get(starts_key, [])[strip_count:]
+        stripped[tail_key] = alignment.get(tail_key, [])[strip_count:]
+        return stripped
+    return alignment
 
 
 def calculate_word_times(
@@ -485,7 +569,7 @@ class ElevenLabsTTSService(WebsocketTTSService):
             text_aggregation_mode=text_aggregation_mode,
             aggregate_sentences=aggregate_sentences,
             push_text_frames=False,
-            push_stop_frames=True,
+            push_stop_frames=False,
             pause_frame_processing=True,
             sample_rate=sample_rate,
             settings=default_settings,
@@ -519,6 +603,11 @@ class ElevenLabsTTSService(WebsocketTTSService):
         # Track partial words that span across alignment chunks
         self._partial_word = ""
         self._partial_word_start_time = 0.0
+        self._alignment_started_context_ids: set[str | None] = set()
+
+        # Context IDs whose context-init has been sent, so the keepalive knows
+        # which contexts are safe to target.
+        self._context_init_sent: set[str] = set()
 
         # Context management for v1 multi API
         self._receive_task = None
@@ -586,6 +675,7 @@ class ElevenLabsTTSService(WebsocketTTSService):
             if audio_contexts:
                 for ctx_id in audio_contexts:
                     await self._close_context(ctx_id)
+                    self._reset_alignment_state(ctx_id)
 
         if not url_changed:
             # Reconnect applies all settings; only warn about fields not handled
@@ -717,6 +807,7 @@ class ElevenLabsTTSService(WebsocketTTSService):
         finally:
             await self.remove_active_audio_context()
             self._websocket = None
+            self._context_init_sent.clear()
             await self._call_event_handler("on_disconnected")
 
     def _get_websocket(self):
@@ -741,24 +832,34 @@ class ElevenLabsTTSService(WebsocketTTSService):
                 )
             except Exception as e:
                 await self.push_error(error_msg=f"Unknown error occurred: {e}", exception=e)
+
+    def _reset_alignment_state(self, context_id: str):
         self._cumulative_time = 0.0
         self._partial_word = ""
         self._partial_word_start_time = 0.0
+        self._alignment_started_context_ids.discard(context_id)
+        self._context_init_sent.discard(context_id)
 
     async def on_audio_context_interrupted(self, context_id: str):
         """Close the ElevenLabs context when the bot is interrupted."""
         await self._close_context(context_id)
+        self._reset_alignment_state(context_id)
         await super().on_audio_context_interrupted(context_id)
 
     async def on_audio_context_completed(self, context_id: str):
-        """Close the ElevenLabs context after all audio has been played.
-
-        ElevenLabs does not send a server-side signal when a context is
-        exhausted, so Pipecat must explicitly close it with
-        ``close_context: True`` to free server-side resources.
-        """
-        await self._close_context(context_id)
+        """Reset alignment state after all audio for the context has played."""
+        self._reset_alignment_state(context_id)
         await super().on_audio_context_completed(context_id)
+
+    async def on_turn_context_completed(self):
+        """Close the server-side context at end of turn.
+
+        Sends close_context so isFinal arrives immediately after the last audio byte.
+        """
+        context_id = self._turn_context_id
+        await super().on_turn_context_completed()
+        if context_id:
+            await self._close_context(context_id)
 
     async def _receive_messages(self):
         """Handle incoming WebSocket messages from ElevenLabs."""
@@ -768,33 +869,34 @@ class ElevenLabsTTSService(WebsocketTTSService):
             received_ctx_id = msg.get("contextId")
 
             # Handle final messages first, regardless of context availability
-            # At the moment, this message is received AFTER the close_context message is
-            # sent, so it doesn't serve any functional purpose. For now, we'll just log it.
             if msg.get("isFinal") is True:
-                logger.trace(f"Received final message for context {received_ctx_id}")
-                continue
-
-            # Check if this message belongs to the current context.
-            if not self.audio_context_available(received_ctx_id):
-                if self.get_active_audio_context_id() == received_ctx_id:
-                    logger.debug(
-                        f"Received a delayed message, recreating the context: {received_ctx_id}"
+                logger.debug(f"Received final message for context {received_ctx_id}")
+                # In case of interruption, there is no audio context available, so we don’t need to do anything.
+                if self.audio_context_available(received_ctx_id):
+                    await self.append_to_audio_context(
+                        received_ctx_id, TTSStoppedFrame(context_id=received_ctx_id)
                     )
-                    await self.create_audio_context(received_ctx_id)
-                else:
-                    # This can happen if a message is received _after_ we have closed a context
-                    # due to user interruption but _before_ the `isFinal` message for the context
-                    # is received.
-                    logger.debug(f"Ignoring message from unavailable context: {received_ctx_id}")
-                    continue
+                    await self.remove_audio_context(received_ctx_id)
+                continue
 
             if msg.get("audio"):
                 audio = base64.b64decode(msg["audio"])
                 frame = TTSAudioRawFrame(audio, self.sample_rate, 1, context_id=received_ctx_id)
                 await self.append_to_audio_context(received_ctx_id, frame)
 
-            if msg.get("alignment"):
-                alignment = msg["alignment"]
+            raw_alignment = _select_alignment(
+                msg,
+                normalized_key="normalizedAlignment",
+                alignment_key="alignment",
+                prefer_normalized=bool(self._pronunciation_dictionary_locators),
+            )
+            if raw_alignment:
+                alignment = _strip_utterance_leading_spaces(
+                    raw_alignment,
+                    ("chars", "charStartTimesMs", "charDurationsMs"),
+                    received_ctx_id not in self._alignment_started_context_ids,
+                )
+                self._alignment_started_context_ids.add(received_ctx_id)
                 word_times, self._partial_word, self._partial_word_start_time = (
                     calculate_word_times(
                         alignment,
@@ -805,7 +907,17 @@ class ElevenLabsTTSService(WebsocketTTSService):
                 )
 
                 if word_times:
-                    await self.add_word_timestamps(word_times, received_ctx_id)
+                    await self.add_word_timestamps(
+                        word_times,
+                        received_ctx_id,
+                        includes_inter_frame_spaces=(
+                            True
+                            if _word_timestamps_include_inter_frame_spaces(
+                                assert_given(self._settings.language)
+                            )
+                            else None
+                        ),
+                    )
 
                     # Calculate the actual end time of this audio chunk
                     char_start_times_ms = alignment.get("charStartTimesMs", [])
@@ -829,25 +941,34 @@ class ElevenLabsTTSService(WebsocketTTSService):
         while True:
             await asyncio.sleep(KEEPALIVE_SLEEP)
             try:
-                if self._websocket and self._websocket.state is State.OPEN:
-                    context_id = self.get_active_audio_context_id()
-                    if context_id:
-                        # Send keepalive with context ID to keep the connection alive
-                        keepalive_message = {
-                            "text": "",
-                            "context_id": context_id,
-                        }
-                        logger.trace(f"Sending keepalive for context {context_id}")
-                    else:
-                        # It's possible to have a user interruption which clears the context
-                        # without generating a new TTS response. In this case, we'll just send
-                        # an empty message to keep the connection alive.
-                        keepalive_message = {"text": ""}
-                        logger.trace("Sending keepalive without context")
-                    await self._websocket.send(json.dumps(keepalive_message))
+                await self._send_keepalive()
             except websockets.ConnectionClosed as e:
                 logger.warning(f"{self} keepalive error: {e}")
                 break
+
+    async def _send_keepalive(self):
+        """Send a single keepalive message to keep the WebSocket connection alive.
+
+        Only stamps a ``context_id`` once its context-init (carrying
+        ``voice_settings``) has been sent. Otherwise the keepalive would be the
+        context's first message, with no ``voice_settings``, and ElevenLabs would
+        reject the later context-init with a 1008 policy violation. A context-less
+        keepalive is sufficient until the context-init is sent.
+        """
+        if not self._websocket or self._websocket.state is not State.OPEN:
+            return
+
+        context_id = self.get_active_audio_context_id()
+        if context_id and context_id in self._context_init_sent:
+            # The context's voice_settings context-init has been sent, so it's
+            # safe to keep that context alive.
+            keepalive_message = {"text": "", "context_id": context_id}
+        else:
+            # No active context, or the active context's context-init hasn't been
+            # sent yet. A context-less keepalive keeps the connection alive without
+            # opening the context prematurely.
+            keepalive_message = {"text": ""}
+        await self._websocket.send(json.dumps(keepalive_message))
 
     async def _send_text(self, text: str, context_id: str):
         """Send text to the WebSocket for synthesis."""
@@ -895,6 +1016,9 @@ class ElevenLabsTTSService(WebsocketTTSService):
                             locator.model_dump()
                             for locator in self._pronunciation_dictionary_locators
                         ]
+                    # Mark the context-init as sent so the keepalive may now
+                    # target this context_id.
+                    self._context_init_sent.add(context_id)
                     await self._websocket.send(json.dumps(msg))
                     logger.trace(f"Created new context {context_id}")
 
@@ -1290,6 +1414,7 @@ class ElevenLabsHttpTTSService(TTSService):
 
                 # Track the duration of this utterance based on the last character's end time
                 utterance_duration = 0
+                alignment_started = False
                 async for line in response.content:
                     line_str = line.decode("utf-8").strip()
                     if not line_str:
@@ -1307,21 +1432,44 @@ class ElevenLabsHttpTTSService(TTSService):
                                 audio, self.sample_rate, 1, context_id=context_id
                             )
 
-                        # Process alignment if present
-                        if data and "alignment" in data:
-                            alignment = data["alignment"]
-                            if alignment:  # Ensure alignment is not None
-                                # Get end time of the last character in this chunk
-                                char_end_times = alignment.get("character_end_times_seconds", [])
-                                if char_end_times:
-                                    chunk_end_time = char_end_times[-1]
-                                    # Update to the longest end time seen so far
-                                    utterance_duration = max(utterance_duration, chunk_end_time)
+                        raw_alignment = data and _select_alignment(
+                            data,
+                            normalized_key="normalized_alignment",
+                            alignment_key="alignment",
+                            prefer_normalized=bool(self._pronunciation_dictionary_locators),
+                        )
+                        if raw_alignment:
+                            alignment = _strip_utterance_leading_spaces(
+                                raw_alignment,
+                                (
+                                    "characters",
+                                    "character_start_times_seconds",
+                                    "character_end_times_seconds",
+                                ),
+                                not alignment_started,
+                            )
+                            alignment_started = True
+                            # Get end time of the last character in this chunk
+                            char_end_times = alignment.get("character_end_times_seconds", [])
+                            if char_end_times:
+                                chunk_end_time = char_end_times[-1]
+                                # Update to the longest end time seen so far
+                                utterance_duration = max(utterance_duration, chunk_end_time)
 
-                                # Calculate word timestamps
-                                word_times = self.calculate_word_times(alignment)
-                                if word_times:
-                                    await self.add_word_timestamps(word_times, context_id)
+                            # Calculate word timestamps
+                            word_times = self.calculate_word_times(alignment)
+                            if word_times:
+                                await self.add_word_timestamps(
+                                    word_times,
+                                    context_id,
+                                    includes_inter_frame_spaces=(
+                                        True
+                                        if _word_timestamps_include_inter_frame_spaces(
+                                            assert_given(self._settings.language)
+                                        )
+                                        else None
+                                    ),
+                                )
                     except json.JSONDecodeError as e:
                         logger.warning(f"Failed to parse JSON from stream: {e}")
                         continue
@@ -1333,7 +1481,17 @@ class ElevenLabsHttpTTSService(TTSService):
                 # since this is the end of the utterance
                 if self._partial_word:
                     final_word_time = [(self._partial_word, self._partial_word_start_time)]
-                    await self.add_word_timestamps(final_word_time, context_id)
+                    await self.add_word_timestamps(
+                        final_word_time,
+                        context_id,
+                        includes_inter_frame_spaces=(
+                            True
+                            if _word_timestamps_include_inter_frame_spaces(
+                                assert_given(self._settings.language)
+                            )
+                            else None
+                        ),
+                    )
                     self._partial_word = ""
                     self._partial_word_start_time = 0.0
 

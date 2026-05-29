@@ -15,6 +15,7 @@ import warnings
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import (
+    TYPE_CHECKING,
     Any,
     Generic,
     Protocol,
@@ -53,6 +54,7 @@ from pipecat.frames.frames import (
 from pipecat.processors.aggregators.llm_context import (
     LLMContext,
     LLMSpecificMessage,
+    is_given,
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.ai_service import AIService
@@ -68,6 +70,10 @@ from pipecat.utils.context.llm_context_summarization import (
     DEFAULT_SUMMARIZATION_TIMEOUT,
     LLMContextSummarizationUtil,
 )
+
+if TYPE_CHECKING:
+    from pipecat.pipeline.worker import PipelineWorker
+
 
 # Type alias for a callable that handles LLM function calls.
 FunctionCallHandler = Callable[["FunctionCallParams"], Awaitable[None]]
@@ -111,7 +117,7 @@ class FunctionCallParams:
             it with ``properties=FunctionCallResultProperties(is_final=False)``
             to push intermediate updates before the final result.
         app_resources: The application-defined resources passed to
-            ``PipelineTask(..., app_resources=...)``. Same object — passed by
+            ``PipelineWorker(..., app_resources=...)``. Same object — passed by
             reference, not a copy. Use it to share DB handles, clients, state,
             feature flags, etc. across all of a session's tool handlers.
     """
@@ -125,6 +131,7 @@ class FunctionCallParams:
     # treat it invariantly, rejecting `LLMService[XAdapter]` at the call
     # sites that build FunctionCallParams.
     llm: LLMService[Any]
+    pipeline_worker: PipelineWorker
     context: LLMContext
     result_callback: FunctionCallResultCallback
     app_resources: Any = None
@@ -243,6 +250,15 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
     # However, subclasses should override this with a more specific adapter when necessary.
     adapter_class: type[BaseLLMAdapter] = OpenAILLMAdapter
 
+    # Returned to the LLM as the tool result when an unavailable function is
+    # called. Deliberately neutral about future availability so the LLM can
+    # pick the function up again if it returns (e.g. via the
+    # ``add_tool_change_messages`` activation message, or silently on a
+    # later inference). ``{function_name}`` is substituted at runtime.
+    MISSING_FUNCTION_CALL_MESSAGE_TEMPLATE = (
+        "The function `{function_name}` is not currently available."
+    )
+
     def __init__(
         self,
         run_in_parallel: bool = True,
@@ -284,7 +300,13 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
         self._enable_async_tool_cancellation: bool = enable_async_tool_cancellation
         self._filter_incomplete_user_turns: bool = False
         self._async_tool_cancellation_enabled: bool = False
-        self._base_system_instruction: str | None = None
+        # The user's base system instruction, without composed addons. Captured
+        # here and refreshed when the user changes ``system_instruction`` at
+        # runtime; ``_compose_system_instruction`` always rebuilds the effective
+        # instruction from this plus any appended / addon instructions.
+        base_si = self._settings.system_instruction
+        self._base_system_instruction: str | None = base_si if isinstance(base_si, str) else None
+        self._appended_system_instructions: list[str] = []
         # `adapter_class` is typed as `type[BaseLLMAdapter]` so subclasses
         # don't need to spell out the generic parameter just to subclass
         # (backward compatibility for 3rd-party providers outside this repo).
@@ -376,15 +398,37 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
             await self._cancel_sequential_runner_task()
         await self._cancel_summary_task()
 
-    def _compose_system_instruction(self):
-        """Compose system_instruction from the base and all active addon instructions.
+    def append_system_instruction(self, instruction: str) -> None:
+        """Append durable text to the system instruction, preserving the user's prompt.
 
-        Combines the base system instruction with turn completion instructions
-        (when enabled) and async tool cancellation instructions (when enabled),
-        writing the result to ``self._settings.system_instruction``.
+        The text is composed onto the end of the system instruction (joined
+        with a blank line) and re-applied on every inference, so it survives
+        context-message resets (e.g. ``LLMMessagesUpdateFrame(messages=[])``).
+        Intended for framework components that own an LLM and need to add
+        standard guidance to a user-provided prompt — for example, ``UIWorker``
+        appends the UI wire-format guide. Appended instructions compose after
+        the user's base prompt and alongside the turn-completion and
+        async-tool-cancellation instructions.
+
+        Args:
+            instruction: The instruction text to append.
+        """
+        self._appended_system_instructions.append(instruction)
+        self._compose_system_instruction()
+
+    def _compose_system_instruction(self):
+        """Rebuild ``system_instruction`` from the base prompt and all active addons.
+
+        Joins the user's base system instruction (the single source of truth,
+        captured at construction and refreshed on runtime ``system_instruction``
+        updates) with any appended instructions (e.g. the ``UIWorker`` prompt
+        guide), turn completion instructions (when enabled), and async tool
+        cancellation instructions (when enabled). Safe to call repeatedly — it
+        always rebuilds from the base, so it never compounds.
         """
         base = self._base_system_instruction
         parts = [base] if base else []
+        parts.extend(self._appended_system_instructions)
         if self._filter_incomplete_user_turns:
             parts.append(self._user_turn_completion_config.completion_instructions)
         if self._async_tool_cancellation_enabled:
@@ -412,29 +456,24 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
                 f"{self}: Incomplete turn filtering "
                 f"{'enabled' if self._filter_incomplete_user_turns else 'disabled'}"
             )
-            if self._filter_incomplete_user_turns:
-                # Save the current system_instruction before composing
-                self._base_system_instruction = self._settings.system_instruction
-                self._compose_system_instruction()
-            else:
-                # Restore original system_instruction
-                self._settings.system_instruction = self._base_system_instruction
-                self._base_system_instruction = None
+
+        if "system_instruction" in changed:
+            # The user replaced the base prompt; re-snapshot it so composition
+            # rebuilds the effective instruction from the new value.
+            base_si = self._settings.system_instruction
+            self._base_system_instruction = base_si if isinstance(base_si, str) else None
 
         if "user_turn_completion_config" in changed and self._filter_incomplete_user_turns:
             self.set_user_turn_completion_config(
                 assert_given(self._settings.user_turn_completion_config)
             )
-            self._compose_system_instruction()
 
-        if (
-            "system_instruction" in changed
-            and (self._filter_incomplete_user_turns or self._async_tool_cancellation_enabled)
-            and "filter_incomplete_user_turns" not in changed
-        ):
-            # system_instruction changed while composition is active.
-            # Treat the new value as the new base and recompose.
-            self._base_system_instruction = self._settings.system_instruction
+        # Any of these fields changes the composed instruction; rebuild it.
+        if changed.keys() & {
+            "filter_incomplete_user_turns",
+            "system_instruction",
+            "user_turn_completion_config",
+        }:
             self._compose_system_instruction()
 
         return changed
@@ -639,7 +678,12 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
                 interruption occurs. When ``False`` the call is treated as
                 asynchronous: the LLM continues the conversation immediately
                 without waiting for the result, and the result is injected later
-                via a developer message. Defaults to True.
+                via a developer message. Defaults to True. Note: realtime
+                LLM services deliver only the final result to the provider;
+                intermediate streamed results (reported via
+                ``FunctionCallResultProperties(is_final=False)``) are
+                dropped and an error is raised. Use a non-realtime LLM
+                service if your tool needs to stream intermediate results.
             timeout_secs: Optional per-tool timeout in seconds. Overrides the global
                 ``function_call_timeout_secs`` for this specific function. Defaults to
                 None, which uses the global timeout.
@@ -677,7 +721,12 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
                 interruption occurs. When ``False`` the call is treated as
                 asynchronous: the LLM continues the conversation immediately
                 without waiting for the result, and the result is injected later
-                via a developer message. Defaults to True.
+                via a developer message. Defaults to True. Note: realtime
+                LLM services deliver only the final result to the provider;
+                intermediate streamed results (reported via
+                ``FunctionCallResultProperties(is_final=False)``) are
+                dropped and an error is raised. Use a non-realtime LLM
+                service if your tool needs to stream intermediate results.
             timeout_secs: Optional per-tool timeout in seconds. Overrides the global
                 ``function_call_timeout_secs`` for this specific function. Defaults to
                 None, which uses the global timeout.
@@ -731,6 +780,19 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
             return True
         return function_name in self._functions.keys()
 
+    def _function_is_async(self, function_name: str) -> bool:
+        """Whether the named function was registered with cancel_on_interruption=False.
+
+        Mirrors the registry-lookup pattern in :meth:`run_function_calls`:
+        a name-specific entry takes precedence; if there isn't one, fall
+        back to the ``None``-keyed catch-all entry. Returns ``False`` if
+        no entry matches.
+        """
+        item = self._functions.get(function_name)
+        if item is None:
+            item = self._functions.get(None)
+        return item is not None and not item.cancel_on_interruption
+
     async def run_function_calls(self, function_calls: Sequence[FunctionCallFromLLM]):
         """Execute a sequence of function calls from the LLM.
 
@@ -764,9 +826,7 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
             elif None in self._functions.keys():
                 item = self._functions[None]
             else:
-                logger.warning(
-                    f"{self} is calling '{function_call.function_name}', but it's not registered."
-                )
+                self._log_missing_function_call(function_call.function_name, function_call.context)
                 item = self._build_missing_function_call_registry_item(function_call.function_name)
 
             runner_items.append(
@@ -835,8 +895,12 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
         elif runner_item.registry_item.handler == self._missing_function_call_handler:
             item = runner_item.registry_item
         else:
+            # Function was unregistered between queue and execution; the
+            # registry-item-handler check above already covered the
+            # missing-from-the-start case.
             logger.warning(
-                f"{self} is calling '{runner_item.function_name}', but it was just unregistered."
+                f"{self}: '{runner_item.function_name}' was just unregistered "
+                f"between queueing and execution."
             )
             item = self._build_missing_function_call_registry_item(runner_item.function_name)
 
@@ -912,9 +976,6 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
         # it starts would leave the coroutine in a "never awaited" state.
         await asyncio.sleep(0)
 
-        # _pipeline_task may be unset when the service is driven without a PipelineTask.
-        app_resources = self._pipeline_task.app_resources if self._pipeline_task else None
-
         try:
             if isinstance(item.handler, DirectFunctionWrapper):
                 # Handler is a DirectFunctionWrapper
@@ -925,9 +986,10 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
                         tool_call_id=runner_item.tool_call_id,
                         arguments=runner_item.arguments,
                         llm=self,
+                        pipeline_worker=self.pipeline_worker,
                         context=runner_item.context,
                         result_callback=function_call_result_callback,
-                        app_resources=app_resources,
+                        app_resources=self.pipeline_worker.app_resources,
                     ),
                 )
             else:
@@ -937,9 +999,10 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
                     tool_call_id=runner_item.tool_call_id,
                     arguments=runner_item.arguments,
                     llm=self,
+                    pipeline_worker=self.pipeline_worker,
                     context=runner_item.context,
                     result_callback=function_call_result_callback,
-                    app_resources=app_resources,
+                    app_resources=self.pipeline_worker.app_resources,
                 )
                 await item.handler(params)
         except Exception as e:
@@ -962,7 +1025,45 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
 
     async def _missing_function_call_handler(self, params: FunctionCallParams):
         """Return a terminal tool result when the LLM calls an unknown function."""
-        await params.result_callback(f"Error: function '{params.function_name}' is not registered.")
+        await params.result_callback(
+            self.MISSING_FUNCTION_CALL_MESSAGE_TEMPLATE.format(function_name=params.function_name)
+        )
+
+    @staticmethod
+    def _advertised_tool_names(context) -> set[str]:
+        """Return the set of standard-tool names currently advertised to the LLM.
+
+        Custom (LLM-specific) tools are not included, since they have no
+        consistent name field across adapters.
+        """
+        tools = context.tools if context is not None else None
+        if tools is None or not is_given(tools):
+            return set()
+        return {t.name for t in tools.standard_tools}
+
+    def _log_missing_function_call(self, function_name: str, context) -> None:
+        """Log an appropriate message when a tool is called with no handler.
+
+        Distinguishes two cases:
+
+        - **Developer error:** the tool is advertised to the LLM but no handler
+          was registered (likely a missed ``register_function`` call). Logged
+          at error level since this almost always indicates a bug.
+        - **Hallucination:** the tool is not in the currently advertised tool
+          set. Logged at warning level since this is model behavior the
+          application can do little about beyond returning a terminal result.
+        """
+        if function_name in self._advertised_tool_names(context):
+            logger.error(
+                f"{self}: tool '{function_name}' is advertised to the LLM "
+                f"but has no registered handler — did you forget to call "
+                f"register_function()?"
+            )
+        else:
+            logger.warning(
+                f"{self}: LLM called '{function_name}', which is not in the "
+                f"currently advertised tool set."
+            )
 
     def _has_async_tools(self) -> bool:
         """Return True if at least one non-builtin async tool is registered."""
@@ -982,10 +1083,6 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
         logger.debug(f"{self}: Enabling async tool cancellation")
 
         self._async_tool_cancellation_enabled = True
-
-        if self._base_system_instruction is None:
-            self._base_system_instruction = self._settings.system_instruction
-
         self._compose_system_instruction()
 
         self._adapter.builtin_tools[CANCEL_ASYNC_TOOL_NAME] = CANCEL_ASYNC_TOOL_SCHEMA

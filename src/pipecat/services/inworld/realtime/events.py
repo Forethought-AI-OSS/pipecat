@@ -124,7 +124,7 @@ class AudioOutput(BaseModel):
 
     Parameters:
         format: The format configuration for output audio.
-        model: The TTS model to use (e.g. "inworld-tts-1.5-max").
+        model: The TTS model to use (e.g. "inworld-tts-2").
         voice: The voice ID to use (e.g. "Sarah", "Clive").
     """
 
@@ -853,16 +853,17 @@ def parse_server_event(data: str):
         data: JSON string containing the server event.
 
     Returns:
-        Parsed server event object of the appropriate type.
+        Parsed server event object of the appropriate type, or ``None`` if the
+        event type is not recognized (e.g. a newer server event without a model).
 
     Raises:
-        Exception: If the event type is unimplemented or parsing fails.
+        Exception: If a recognized event type fails to parse.
     """
+    event = json.loads(data)
+    event_type = event["type"]
+    if event_type not in _server_event_types:
+        return None
     try:
-        event = json.loads(data)
-        event_type = event["type"]
-        if event_type not in _server_event_types:
-            raise Exception(f"Unimplemented server event type: {event_type}")
         return _server_event_types[event_type].model_validate(event)
     except Exception as e:
         raise Exception(f"{e} \n\n{data}")

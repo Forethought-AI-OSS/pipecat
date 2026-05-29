@@ -48,7 +48,8 @@ from pipecat.frames.frames import (
     UserStoppedSpeakingFrame,
 )
 from pipecat.metrics.metrics import LLMTokenUsage
-from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators import async_tool_messages
+from pipecat.processors.aggregators.llm_context import LLMContext, LLMSpecificMessage
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.llm_service import FunctionCallFromLLM, LLMService
 from pipecat.services.settings import (
@@ -67,7 +68,7 @@ try:
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error("In order to use Inworld Realtime, you need to `pip install pipecat-ai[inworld]`.")
-    raise Exception(f"Missing module: {e}")
+    raise ImportError(f"Missing module: {e}") from e
 
 
 @dataclass
@@ -206,7 +207,7 @@ class InworldRealtimeLLMService(LLMService[InworldRealtimeLLMAdapter]):
             api_key=os.getenv("INWORLD_API_KEY"),
             llm_model="openai/gpt-4.1-nano",
             voice="Sarah",
-            tts_model="inworld-tts-1.5-max",
+            tts_model="inworld-tts-2",
         )
 
     For full control over session properties (note: ``session_properties``
@@ -231,7 +232,7 @@ class InworldRealtimeLLMService(LLMService[InworldRealtimeLLMAdapter]):
                         output=AudioOutput(
                             format=PCMAudioFormat(rate=24000),
                             voice="Sarah",
-                            model="inworld-tts-1.5-max",
+                            model="inworld-tts-2",
                         ),
                     ),
                 ),
@@ -269,11 +270,12 @@ class InworldRealtimeLLMService(LLMService[InworldRealtimeLLMAdapter]):
                 Shorthand for ``session_properties.model``.
             voice: Voice ID for TTS output (e.g. "Sarah", "Clive").
                 Shorthand for ``session_properties.audio.output.voice``.
-            tts_model: TTS model to use (e.g. "inworld-tts-1.5-max").
+            tts_model: TTS model to use (e.g. "inworld-tts-2").
                 Shorthand for ``session_properties.audio.output.model``.
             stt_model: STT model for input transcription
-                (e.g. "assemblyai/universal-streaming-multilingual").
-                Shorthand for ``session_properties.audio.input.transcription.model``.
+                (e.g. "inworld/inworld-stt-1"). Defaults to ``"inworld/inworld-stt-1"``;
+                pass ``stt_model=`` to override. Shorthand for
+                ``session_properties.audio.input.transcription.model``.
             base_url: WebSocket base URL for the realtime API.
             auth_type: Authentication type. ``"basic"`` for server-side API key
                 auth, ``"bearer"`` for client-side JWT auth.
@@ -286,8 +288,8 @@ class InworldRealtimeLLMService(LLMService[InworldRealtimeLLMAdapter]):
         """
         default_model = llm_model or "openai/gpt-4.1-mini"
         default_voice = voice or "Clive"
-        default_tts_model = tts_model or "inworld-tts-1.5-max"
-        default_stt_model = stt_model or "assemblyai/u3-rt-pro"
+        default_tts_model = tts_model or "inworld-tts-2"
+        default_stt_model = stt_model or "inworld/inworld-stt-1"
 
         default_settings = self.Settings(
             model=default_model,
@@ -361,6 +363,7 @@ class InworldRealtimeLLMService(LLMService[InworldRealtimeLLMAdapter]):
         self._messages_added_manually = {}
         self._pending_function_calls = {}
         self._completed_tool_calls = set()
+        self._async_tool_warning_logged: bool = False
 
         self._register_event_handler("on_conversation_item_created")
         self._register_event_handler("on_conversation_item_updated")
@@ -629,6 +632,7 @@ class InworldRealtimeLLMService(LLMService[InworldRealtimeLLMAdapter]):
                 self._receive_task = None
 
             self._completed_tool_calls = set()
+            self._async_tool_warning_logged = False
             self._audio_buffer = b""
             self._interim_transcription_text = ""
             self._disconnecting = False
@@ -702,14 +706,16 @@ class InworldRealtimeLLMService(LLMService[InworldRealtimeLLMAdapter]):
                 logger.warning(f"Failed to decode server message: {message[:200]}")
                 continue
 
-            # Skip events that don't have a matching Pydantic model
-            if event_type in ("conversation.item.done",):
-                continue
-
             try:
                 evt = events.parse_server_event(message)
             except Exception as e:
                 logger.warning(f"Failed to parse server event: {e}")
+                continue
+
+            # Unrecognized event type (e.g. newer realtime server events without a
+            # model, like response.output_text.done). Benign — log quietly and skip.
+            if evt is None:
+                logger.debug(f"{self} ignoring unhandled server event: {event_type}")
                 continue
 
             if evt.type == "ping":
@@ -754,6 +760,8 @@ class InworldRealtimeLLMService(LLMService[InworldRealtimeLLMAdapter]):
                 else:
                     await self._handle_evt_error(evt)
                     return
+            else:
+                logger.debug(f"{self} received known but undispatched server event: {evt.type}")
 
     async def _handle_evt_session_created(self, evt):
         """Handle session.created event — first event after connecting."""
@@ -1000,9 +1008,80 @@ class InworldRealtimeLLMService(LLMService[InworldRealtimeLLMAdapter]):
 
     async def _process_completed_function_calls(self, send_new_results: bool):
         """Process completed function calls and send results to the service."""
+        # If the user registered a function with cancel_on_interruption=False,
+        # the aggregator emits async-tool-style messages into the context. As
+        # of this writing, Inworld Realtime doesn't appear to handle the
+        # resulting delayed tool result reliably — the routing code below
+        # is best-effort. Surface a one-time warning so users see they're not
+        # getting what they expect.
+        if not self._async_tool_warning_logged:
+            for message in self._context.get_messages():
+                if isinstance(message, LLMSpecificMessage):
+                    continue
+                if async_tool_messages.parse_message(message) is not None:
+                    logger.error(
+                        f"{self}: cancel_on_interruption=False is not reliably "
+                        f"supported by Inworld Realtime as of this writing. "
+                        f"Use cancel_on_interruption=True (the default), or "
+                        f"consider another LLM service if your tool needs the "
+                        f"async semantics."
+                    )
+                    await self.push_error(
+                        error_msg=(
+                            "cancel_on_interruption=False is not reliably supported "
+                            "by Inworld Realtime as of this writing."
+                        ),
+                    )
+                    self._async_tool_warning_logged = True
+                    break
+
         sent_new_result = False
 
         for message in self._context.get_messages():
+            # LLMSpecificMessages are opaque provider-specific payloads, not
+            # standard tool-result messages — skip them.
+            if isinstance(message, LLMSpecificMessage):
+                continue
+
+            # Async-tool messages live alongside regular tool messages in the
+            # context; detect and route them before the regular logic so we
+            # don't try to send the async-tool envelope JSON as a tool result.
+            async_payload = async_tool_messages.parse_message(message)
+            if async_payload is not None:
+                if async_payload.tool_call_id in self._completed_tool_calls:
+                    continue
+                if async_payload.kind == "started":
+                    # The provider already issued the tool call and natively
+                    # awaits a result; nothing to send for the started marker.
+                    continue
+                if async_payload.kind == "intermediate":
+                    logger.error(
+                        f"{self}: Inworld Realtime does not support streamed async "
+                        f"tool results; dropping intermediate result for "
+                        f"tool_call_id={async_payload.tool_call_id}. Consider "
+                        f"another LLM service if your tool needs to stream "
+                        f"intermediate results."
+                    )
+                    await self.push_error(
+                        error_msg="Inworld Realtime does not support streamed async tool results.",
+                    )
+                    continue
+                if async_payload.kind == "final":
+                    # Deliver via the formal tool-result channel — same path
+                    # as a synchronous tool result, just delayed.
+                    if send_new_results:
+                        sent_new_result = True
+                        await self._send_tool_result(
+                            async_payload.tool_call_id, async_payload.result
+                        )
+                    self._completed_tool_calls.add(async_payload.tool_call_id)
+                    continue
+                # Defensive: any async-tool message must not fall through
+                # to the regular tool-result block below, even if it
+                # carries a kind we don't recognize.
+                continue
+
+            # Look for newly-completed "regular" (as opposed to async-tool) results
             if message.get("role") == "tool" and message.get("content") != "IN_PROGRESS":
                 tool_call_id = message.get("tool_call_id")
                 if tool_call_id and tool_call_id not in self._completed_tool_calls:
@@ -1011,6 +1090,8 @@ class InworldRealtimeLLMService(LLMService[InworldRealtimeLLMAdapter]):
                         await self._send_tool_result(tool_call_id, message.get("content"))
                     self._completed_tool_calls.add(tool_call_id)
 
+        # If we reported any new tool call results to the service, trigger
+        # another response
         if sent_new_result:
             await self._create_response()
 

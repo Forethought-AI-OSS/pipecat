@@ -43,7 +43,7 @@ try:
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error("In order to use Inworld WebSocket TTS, you need to `pip install websockets`.")
-    raise Exception(f"Missing module: {e}")
+    raise ImportError(f"Missing module: {e}") from e
 
 from pipecat.frames.frames import (
     AggregationType,
@@ -60,7 +60,38 @@ from pipecat.frames.frames import (
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.tts_service import TextAggregationMode, TTSService, WebsocketTTSService
+from pipecat.transcriptions.language import Language, resolve_language
 from pipecat.utils.tracing.service_decorators import traced_tts
+
+
+def language_to_inworld_language(language: Language) -> str:
+    """Convert a Language enum to an Inworld TTS BCP-47 language tag.
+
+    Args:
+        language: The Language enum value to convert.
+
+    Returns:
+        The corresponding Inworld BCP-47 language tag (e.g. ``"en-US"``).
+        Unverified languages fall back to their BCP-47 string value with a warning.
+    """
+    LANGUAGE_MAP = {
+        Language.AR: "ar-SA",
+        Language.DE: "de-DE",
+        Language.EN: "en-US",
+        Language.ES: "es-ES",
+        Language.FR: "fr-FR",
+        Language.HE: "he-IL",
+        Language.HI: "hi-IN",
+        Language.IT: "it-IT",
+        Language.JA: "ja-JP",
+        Language.KO: "ko-KR",
+        Language.NL: "nl-NL",
+        Language.PL: "pl-PL",
+        Language.PT: "pt-BR",
+        Language.RU: "ru-RU",
+        Language.ZH: "zh-CN",
+    }
+    return resolve_language(language, LANGUAGE_MAP, use_base_code=False)
 
 
 @dataclass
@@ -70,10 +101,18 @@ class InworldTTSSettings(TTSSettings):
     Parameters:
         speaking_rate: Speaking rate for speech synthesis.
         temperature: Temperature for speech synthesis.
+        delivery_mode: Controls the stability vs. creativity tradeoff.
+            ``"STABLE"`` produces reliable, predictable speech.
+            ``"BALANCED"`` is the default midpoint.
+            ``"CREATIVE"`` produces more expressive, emotionally varied speech.
+            Only supported by ``inworld-tts-2``.
     """
 
     speaking_rate: float | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     temperature: float | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    delivery_mode: Literal["STABLE", "BALANCED", "CREATIVE"] | None | _NotGiven = field(
+        default_factory=lambda: NOT_GIVEN
+    )
 
     _aliases: ClassVar[dict[str, str]] = {
         "voiceId": "voice",
@@ -94,7 +133,7 @@ class InworldHttpTTSService(TTSService):
     """Inworld AI HTTP-based TTS service.
 
     Supports both streaming and non-streaming modes via the `streaming` parameter.
-    Outputs LINEAR16 audio at configurable sample rates with word-level timestamps.
+    Outputs PCM audio at configurable sample rates with word-level timestamps.
     """
 
     Settings = InworldTTSSettings
@@ -125,7 +164,7 @@ class InworldHttpTTSService(TTSService):
         model: str | None = None,
         streaming: bool = True,
         sample_rate: int | None = None,
-        encoding: str = "LINEAR16",
+        encoding: str = "PCM",
         timestamp_transport_strategy: Literal["ASYNC", "SYNC"] | None = "ASYNC",
         params: InputParams | None = None,
         settings: Settings | None = None,
@@ -162,11 +201,12 @@ class InworldHttpTTSService(TTSService):
         """
         # 1. Initialize default_settings with hardcoded defaults
         default_settings = self.Settings(
-            model="inworld-tts-1.5-max",
+            model="inworld-tts-2",
             voice="Ashley",
             language=None,
             speaking_rate=None,
             temperature=None,
+            delivery_mode=None,
         )
 
         # 2. Apply direct init arg overrides (deprecated)
@@ -226,6 +266,17 @@ class InworldHttpTTSService(TTSService):
             True, as Inworld TTS service supports metrics generation.
         """
         return True
+
+    def language_to_service_language(self, language: Language) -> str | None:
+        """Convert a Language enum to Inworld language format.
+
+        Args:
+            language: The language to convert.
+
+        Returns:
+            The Inworld-specific BCP-47 language code, or None if not supported.
+        """
+        return language_to_inworld_language(language)
 
     async def start(self, frame: StartFrame):
         """Start the Inworld TTS service.
@@ -313,6 +364,10 @@ class InworldHttpTTSService(TTSService):
 
         if self._settings.temperature is not None:
             payload["temperature"] = self._settings.temperature
+        if self._settings.delivery_mode is not None:
+            payload["deliveryMode"] = self._settings.delivery_mode
+        if self._settings.language is not None:
+            payload["language"] = self._settings.language
 
         # Use WORD timestamps for simplicity and correct spacing/capitalization
         payload["timestampType"] = self._timestamp_type
@@ -411,7 +466,7 @@ class InworldHttpTTSService(TTSService):
                         if word_times:
                             self._current_run_had_timestamps = True
                             await self.add_word_timestamps(
-                                word_times, context_id, includes_inter_frame_spaces=True
+                                word_times, context_id, pre_merge_tokens=True
                             )
                         # Track the maximum end time across all chunks
                         utterance_duration = max(utterance_duration, chunk_end_time)
@@ -449,9 +504,7 @@ class InworldHttpTTSService(TTSService):
             word_times, chunk_end_time = self._calculate_word_times(timestamp_info)
             if word_times:
                 self._current_run_had_timestamps = True
-                await self.add_word_timestamps(
-                    word_times, context_id, includes_inter_frame_spaces=True
-                )
+                await self.add_word_timestamps(word_times, context_id, pre_merge_tokens=True)
             utterance_duration = chunk_end_time
 
         audio_data = base64.b64decode(response_data["audioContent"])
@@ -505,7 +558,7 @@ class InworldTTSService(WebsocketTTSService):
     """Inworld AI WebSocket-based TTS service.
 
     Uses bidirectional WebSocket for lower latency streaming. Supports multiple
-    independent audio contexts per connection (max 5). Outputs LINEAR16 audio
+    independent audio contexts per connection (max 5). Outputs PCM audio
     with word-level timestamps.
     """
 
@@ -548,7 +601,7 @@ class InworldTTSService(WebsocketTTSService):
         model: str | None = None,
         url: str = "wss://api.inworld.ai/tts/v1/voice:streamBidirectional",
         sample_rate: int | None = None,
-        encoding: str = "LINEAR16",
+        encoding: str = "PCM",
         auto_mode: bool | None = None,
         apply_text_normalization: str | None = None,
         timestamp_transport_strategy: Literal["ASYNC", "SYNC"] | None = "ASYNC",
@@ -604,11 +657,12 @@ class InworldTTSService(WebsocketTTSService):
 
         # 1. Initialize default_settings with hardcoded defaults
         default_settings = self.Settings(
-            model="inworld-tts-1.5-max",
+            model="inworld-tts-2",
             voice="Ashley",
             language=None,
             speaking_rate=None,
             temperature=None,
+            delivery_mode=None,
         )
 
         # 2. Apply direct init arg overrides (deprecated)
@@ -699,6 +753,17 @@ class InworldTTSService(WebsocketTTSService):
             True, as Inworld WebSocket TTS service supports metrics generation.
         """
         return True
+
+    def language_to_service_language(self, language: Language) -> str | None:
+        """Convert a Language enum to Inworld language format.
+
+        Args:
+            language: The language to convert.
+
+        Returns:
+            The Inworld-specific BCP-47 language code, or None if not supported.
+        """
+        return language_to_inworld_language(language)
 
     async def start(self, frame: StartFrame):
         """Start the Inworld WebSocket TTS service.
@@ -1019,9 +1084,7 @@ class InworldTTSService(WebsocketTTSService):
                 if word_times:
                     if ctx_id:
                         self._contexts_with_timestamps.add(ctx_id)
-                    await self.add_word_timestamps(
-                        word_times, ctx_id, includes_inter_frame_spaces=True
-                    )
+                    await self.add_word_timestamps(word_times, ctx_id, pre_merge_tokens=True)
 
             # Handle flush completion, which indicates the end of a generation
             if "flushCompleted" in result:
@@ -1089,6 +1152,10 @@ class InworldTTSService(WebsocketTTSService):
 
         if self._settings.temperature is not None:
             create_config["temperature"] = self._settings.temperature
+        if self._settings.delivery_mode is not None:
+            create_config["deliveryMode"] = self._settings.delivery_mode
+        if self._settings.language is not None:
+            create_config["language"] = self._settings.language
         if self._apply_text_normalization is not None:
             create_config["applyTextNormalization"] = self._apply_text_normalization
         if self._auto_mode is not None:

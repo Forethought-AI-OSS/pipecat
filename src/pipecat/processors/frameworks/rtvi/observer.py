@@ -58,6 +58,8 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.frameworks.rtvi.frames import (
     RTVIServerMessageFrame,
     RTVIServerResponseFrame,
+    RTVIUICommandFrame,
+    RTVIUIJobGroupFrame,
 )
 from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.utils.string import match_endofsentence
@@ -430,6 +432,15 @@ class RTVIObserver(BaseObserver):
         elif isinstance(frame, RTVIServerMessageFrame):
             message = RTVI.ServerMessage(data=frame.data)
             await self.send_rtvi_message(message)
+        elif isinstance(frame, RTVIUICommandFrame):
+            message = RTVI.UICommandMessage(
+                data=RTVI.UICommandData(command=frame.command, payload=frame.payload)
+            )
+            await self.send_rtvi_message(message)
+        elif isinstance(frame, RTVIUIJobGroupFrame):
+            if frame.data is not None:
+                message = RTVI.UIJobGroupMessage(data=frame.data)
+                await self.send_rtvi_message(message)
         elif isinstance(frame, RTVIServerResponseFrame):
             if frame.error is not None:
                 await self._send_error_response(frame)
@@ -517,6 +528,9 @@ class RTVIObserver(BaseObserver):
                 text = await transform(text, agg_type)
 
         isTTS = isinstance(frame, TTSTextFrame)
+        if agg_type is not AggregationType.WORD:
+            logger.trace(f"{self} Aggregated LLM text: {text}, {agg_type} spoken:{isTTS}")
+
         if self._params.bot_output_enabled:
             message = RTVI.BotOutputMessage(
                 data=RTVI.BotOutputMessageData(text=text, spoken=isTTS, aggregated_by=agg_type)

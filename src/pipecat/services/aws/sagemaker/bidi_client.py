@@ -32,7 +32,7 @@ except ModuleNotFoundError as e:
     logger.error(
         "In order to use SageMaker BiDi client, you need to `pip install pipecat-ai[sagemaker]`."
     )
-    raise Exception(f"Missing module: {e}")
+    raise ImportError(f"Missing module: {e}") from e
 
 
 class SageMakerBidiClient:
@@ -63,8 +63,8 @@ class SageMakerBidiClient:
         self,
         endpoint_name: str,
         region: str,
-        model_invocation_path: str = "",
-        model_query_string: str = "",
+        model_invocation_path: str | None = "",
+        model_query_string: str | None = "",
     ):
         """Initialize the SageMaker BiDi client.
 

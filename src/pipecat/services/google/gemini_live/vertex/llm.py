@@ -36,7 +36,7 @@ try:
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error("In order to use Google Vertex AI, you need to `pip install pipecat-ai[google]`.")
-    raise Exception(f"Missing module: {e}")
+    raise ImportError(f"Missing module: {e}") from e
 
 
 @dataclass
@@ -237,6 +237,20 @@ class GeminiLiveVertexLLMService(GeminiLiveLLMService):
         raise NotImplementedError(
             "When using Vertex AI, the recommended approach is to use Google Cloud Storage for file handling. The Gemini File API is not directly supported in this context."
         )
+
+    @property
+    def _supports_non_blocking_tools(self) -> bool:
+        """Vertex AI's Gemini Live endpoint does not yet support NON_BLOCKING tool calls.
+
+        Override the base ``GeminiLiveLLMService`` getter to disable the
+        NON_BLOCKING ``behavior`` field on function declarations and the
+        ``scheduling`` field on FunctionResponse for Vertex sessions —
+        sending either appears to break tool calling against Vertex.
+        Users hitting this on a function registered with
+        ``cancel_on_interruption=False`` will see the same one-time
+        warning the base class surfaces for unsupported models.
+        """
+        return False
 
     @staticmethod
     def _get_credentials(

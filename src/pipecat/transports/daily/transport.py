@@ -75,7 +75,7 @@ except ModuleNotFoundError as e:
     logger.error(
         "In order to use the Daily transport, you need to `pip install pipecat-ai[daily]`."
     )
-    raise Exception(f"Missing module: {e}")
+    raise ImportError(f"Missing module: {e}") from e
 
 VAD_RESET_PERIOD_MS = 2000
 
@@ -526,6 +526,7 @@ class DailyTransportClient(EventHandler):
         self._joined = False
         self._joined_event = asyncio.Event()
         self._leave_counter = 0
+        self._cleanup_counter = 0
 
         self._task_manager: BaseTaskManager | None = None
 
@@ -744,6 +745,7 @@ class DailyTransportClient(EventHandler):
         Args:
             setup: The frame processor setup configuration.
         """
+        self._cleanup_counter += 1
         if self._task_manager:
             return
 
@@ -757,6 +759,12 @@ class DailyTransportClient(EventHandler):
 
     async def cleanup(self):
         """Cleanup client resources and cancel tasks."""
+        # Decrement cleanup counter. DailyInputTransport and DailyOutputTransport
+        # share this client and both call cleanup(), so only run on the last call.
+        self._cleanup_counter -= 1
+        if self._cleanup_counter > 0:
+            return
+
         if self._event_task and self._task_manager:
             await self._task_manager.cancel_task(self._event_task)
             self._event_task = None

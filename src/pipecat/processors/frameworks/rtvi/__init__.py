@@ -10,6 +10,11 @@ from pipecat.processors.frameworks.rtvi.frames import (
     RTVIClientMessageFrame,
     RTVIServerMessageFrame,
     RTVIServerResponseFrame,
+    RTVIUICancelJobGroupFrame,
+    RTVIUICommandFrame,
+    RTVIUIEventFrame,
+    RTVIUIJobGroupFrame,
+    RTVIUISnapshotFrame,
 )
 from pipecat.processors.frameworks.rtvi.observer import (
     RTVIFunctionCallReportLevel,
@@ -26,4 +31,9 @@ __all__ = [
     "RTVIProcessor",
     "RTVIServerMessageFrame",
     "RTVIServerResponseFrame",
+    "RTVIUICancelJobGroupFrame",
+    "RTVIUICommandFrame",
+    "RTVIUIEventFrame",
+    "RTVIUISnapshotFrame",
+    "RTVIUIJobGroupFrame",
 ]

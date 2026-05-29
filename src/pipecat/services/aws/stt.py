@@ -11,7 +11,6 @@ speech-to-text transcription with support for multiple languages and audio forma
 """
 
 import json
-import os
 import random
 import string
 from collections.abc import AsyncGenerator
@@ -29,7 +28,12 @@ from pipecat.frames.frames import (
     StartFrame,
     TranscriptionFrame,
 )
-from pipecat.services.aws.utils import build_event_message, decode_event, get_presigned_url
+from pipecat.services.aws.utils import (
+    build_event_message,
+    decode_event,
+    get_presigned_url,
+    resolve_credentials,
+)
 from pipecat.services.settings import STTSettings, assert_given
 from pipecat.services.stt_latency import AWS_TRANSCRIBE_TTFS_P99
 from pipecat.services.stt_service import WebsocketSTTService
@@ -44,7 +48,7 @@ try:
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error("In order to use AWS services, you need to `pip install pipecat-ai[aws]`.")
-    raise Exception(f"Missing module: {e}")
+    raise ImportError(f"Missing module: {e}") from e
 
 
 @dataclass
@@ -81,9 +85,12 @@ class AWSTranscribeSTTService(WebsocketSTTService):
         """Initialize the AWS Transcribe STT service.
 
         Args:
-            api_key: AWS secret access key. If None, uses AWS_SECRET_ACCESS_KEY environment variable.
-            aws_access_key_id: AWS access key ID. If None, uses AWS_ACCESS_KEY_ID environment variable.
-            aws_session_token: AWS session token for temporary credentials. If None, uses AWS_SESSION_TOKEN environment variable.
+            api_key: AWS secret access key. If None, falls back to environment
+                variables and the default boto3 credential chain (instance
+                profiles, IRSA, ECS task roles, SSO, etc.).
+            aws_access_key_id: AWS access key ID. Same fallback behaviour as
+                ``api_key``.
+            aws_session_token: AWS session token for temporary credentials.
             region: AWS region for the service.
             sample_rate: Audio sample rate in Hz. If None, uses the pipeline sample rate.
                 AWS Transcribe only supports 8000 or 16000 Hz; other values are
@@ -129,11 +136,19 @@ class AWSTranscribeSTTService(WebsocketSTTService):
         self._show_speaker_label = False
         self._enable_channel_identification = False
 
+        # Resolve credentials using the shared chain (explicit → env → boto3).
+        resolved = resolve_credentials(
+            aws_access_key_id=aws_access_key_id,
+            aws_secret_access_key=api_key,
+            aws_session_token=aws_session_token,
+            region=region,
+        )
+
         self._credentials = {
-            "aws_access_key_id": aws_access_key_id or os.getenv("AWS_ACCESS_KEY_ID"),
-            "aws_secret_access_key": api_key or os.getenv("AWS_SECRET_ACCESS_KEY"),
-            "aws_session_token": aws_session_token or os.getenv("AWS_SESSION_TOKEN"),
-            "region": region or os.getenv("AWS_REGION", "us-east-1"),
+            "aws_access_key_id": resolved.access_key,
+            "aws_secret_access_key": resolved.secret_key,
+            "aws_session_token": resolved.session_token,
+            "region": resolved.region,
         }
 
         self._receive_task = None
@@ -324,10 +339,10 @@ class AWSTranscribeSTTService(WebsocketSTTService):
             await self._call_event_handler("on_connected")
             logger.info(f"{self} Successfully connected to AWS Transcribe")
         except Exception as e:
+            self._websocket = None
             await self.push_error(
                 error_msg=f"Unable to connect to AWS Transcribe: {e}", exception=e
             )
-            raise
 
     async def _disconnect_websocket(self):
         """Close the websocket connection to AWS Transcribe."""

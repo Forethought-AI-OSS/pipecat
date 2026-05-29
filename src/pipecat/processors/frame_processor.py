@@ -17,7 +17,7 @@ import asyncio
 import dataclasses
 import traceback
 import warnings
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
 from typing import (
@@ -50,7 +50,7 @@ from pipecat.utils.base_object import BaseObject
 from pipecat.utils.frame_queue import FrameQueue
 
 if TYPE_CHECKING:
-    from pipecat.pipeline.task import PipelineTask
+    from pipecat.pipeline.worker import PipelineWorker
 
 
 class FrameDirection(Enum):
@@ -75,31 +75,31 @@ class FrameProcessorSetup:
     Parameters:
         clock: The clock instance for timing operations.
         task_manager: The task manager for handling async operations.
+        pipeline_worker: The :class:`PipelineWorker` running this pipeline. Stored
+            on each processor as ``self.pipeline_worker`` so processors can
+            reach task-scoped state (e.g. ``self.pipeline_worker.app_resources``).
         observer: Optional observer for monitoring frame processing events.
-        pipeline_task: The :class:`PipelineTask` running this pipeline. Stored
-            on each processor as ``self.pipeline_task`` so processors can
-            reach task-scoped state (e.g. ``self.pipeline_task.app_resources``).
-        tool_resources: Deprecated. :class:`PipelineTask` continues to populate
+        tool_resources: Deprecated. :class:`PipelineWorker` continues to populate
             this with ``app_resources`` so that custom :class:`FrameProcessor`
             subclasses whose ``setup()`` overrides read ``setup.tool_resources``
             keep working. New code should read
-            ``setup.pipeline_task.app_resources`` instead.
+            ``setup.pipeline_worker.app_resources`` instead.
 
             .. deprecated:: 1.2.0
                 Reading this attribute emits a ``DeprecationWarning``. Read
-                ``setup.pipeline_task.app_resources`` instead.
+                ``setup.pipeline_worker.app_resources`` instead.
                 ``tool_resources`` will be removed in a future version.
     """
 
     clock: BaseClock
     task_manager: BaseTaskManager
+    pipeline_worker: PipelineWorker
     observer: BaseObserver | None = None
-    pipeline_task: PipelineTask | None = None
     tool_resources: Any = None
 
     def __getattribute__(self, name: str) -> Any:
         # Warn when user code reads the deprecated ``tool_resources`` field.
-        # Set is unaffected (goes through ``__setattr__``), so PipelineTask can
+        # Set is unaffected (goes through ``__setattr__``), so PipelineWorker can
         # populate it for backwards compat without tripping the warning.
         if name == "tool_resources":
             value = object.__getattribute__(self, "tool_resources")
@@ -108,7 +108,7 @@ class FrameProcessorSetup:
                     warnings.simplefilter("always")
                     warnings.warn(
                         "`FrameProcessorSetup.tool_resources` is deprecated since 1.2.0; "
-                        "read `setup.pipeline_task.app_resources` instead.",
+                        "read `setup.pipeline_worker.app_resources` instead.",
                         DeprecationWarning,
                         stacklevel=2,
                     )
@@ -217,14 +217,12 @@ class FrameProcessor(BaseObject):
         # Clock
         self._clock: BaseClock | None = None
 
-        # Task Manager
-        self._task_manager: BaseTaskManager | None = None
-
         # Observer
         self._observer: BaseObserver | None = None
 
-        # Pipeline Task
-        self._pipeline_task: PipelineTask | None = None
+        # Pipeline Task. Populated by ``setup()``; accessing the
+        # ``pipeline_worker`` property before setup raises.
+        self._pipeline_worker: PipelineWorker | None = None  # set in setup()
 
         # Other properties
         self._enable_metrics = False
@@ -369,34 +367,33 @@ class FrameProcessor(BaseObject):
         return self._report_only_initial_ttfb
 
     @property
-    def task_manager(self) -> BaseTaskManager:
-        """Get the task manager for this processor.
+    def pipeline_worker(self) -> PipelineWorker:
+        """Get the :class:`PipelineWorker` this processor is running in.
 
-        Returns:
-            The task manager instance.
-
-        Raises:
-            Exception: If the task manager is not initialized.
-        """
-        if not self._task_manager:
-            raise Exception(f"{self} TaskManager is still not initialized.")
-        return self._task_manager
-
-    @property
-    def pipeline_task(self) -> PipelineTask | None:
-        """Get the :class:`PipelineTask` this processor is running in.
-
-        Provides access to task-scoped state from inside a processor — most
-        notably ``self.pipeline_task.app_resources`` for the application's
+        Provides access to worker-scoped state from inside a processor — most
+        notably ``self.pipeline_worker.app_resources`` for the application's
         shared bag of resources (DB handles, clients, feature flags, etc.).
 
         Returns:
-            The :class:`PipelineTask` instance that set up this processor,
-            or ``None`` if the processor has not yet been set up by one
-            (for example, before the task has started, or when the processor
-            was instantiated in isolation).
+            The :class:`PipelineWorker` instance that set up this processor.
         """
-        return self._pipeline_task
+        if not self._pipeline_worker:
+            raise Exception(f"{self} pipeline worker is still not set.")
+        return self._pipeline_worker
+
+    @property
+    def pipeline_task(self) -> PipelineWorker:
+        """Deprecated alias for :attr:`pipeline_worker`.
+
+        .. deprecated:: 1.3.0
+            Use :attr:`pipeline_worker` instead.
+        """
+        warnings.warn(
+            "FrameProcessor.pipeline_task is deprecated, use pipeline_worker instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.pipeline_worker
 
     def processors_with_metrics(self):
         """Return processors that can generate metrics.
@@ -511,51 +508,22 @@ class FrameProcessor(BaseObject):
         await self.stop_processing_metrics()
         await self.stop_text_aggregation_metrics()
 
-    def create_task(self, coroutine: Coroutine, name: str | None = None) -> asyncio.Task:
-        """Create a new task managed by this processor.
-
-        Args:
-            coroutine: The coroutine to run in the task.
-            name: Optional name for the task.
-
-        Returns:
-            The created asyncio task.
-        """
-        if name:
-            name = f"{self}::{name}"
-        else:
-            name = f"{self}::{coroutine.cr_code.co_name}"
-        return self.task_manager.create_task(coroutine, name)
-
-    async def cancel_task(self, task: asyncio.Task, timeout: float | None = 1.0):
-        """Cancel a task managed by this processor.
-
-        A default timeout if 1 second is used in order to avoid potential
-        freezes caused by certain libraries that swallow
-        `asyncio.CancelledError`.
-
-        Args:
-            task: The task to cancel.
-            timeout: Optional timeout for task cancellation.
-        """
-        await self.task_manager.cancel_task(task, timeout)
-
     async def setup(self, setup: FrameProcessorSetup):
         """Set up the processor with required components.
 
         Args:
             setup: Configuration object containing setup parameters.
         """
+        await super().setup(setup.task_manager)
         self._clock = setup.clock
-        self._task_manager = setup.task_manager
         self._observer = setup.observer
-        self._pipeline_task = setup.pipeline_task
+        self._pipeline_worker = setup.pipeline_worker
 
         # Create processing tasks.
         self.__create_input_task()
 
         if self._metrics is not None:
-            await self._metrics.setup(self._task_manager)
+            await self._metrics.setup(self.task_manager)
 
     async def cleanup(self):
         """Clean up processor resources."""
@@ -877,14 +845,19 @@ class FrameProcessor(BaseObject):
             current_is_uninterruptible = isinstance(
                 self.__process_current_frame, UninterruptibleFrame
             )
-            if current_is_uninterruptible or self.__process_queue.has_uninterruptible:
-                # We don't want to cancel an UninterruptibleFrame (either the
-                # one currently being processed or one waiting in the queue),
-                # so we simply cleanup the queue keeping only
-                # UninterruptibleFrames.
+            if current_is_uninterruptible:
+                # The frame currently being processed is uninterruptible, so we
+                # must not cancel it. Just flush non-uninterruptible frames from
+                # the queue; any uninterruptible ones will be kept and processed
+                # after the current frame finishes.
                 self.__reset_process_queue()
             else:
-                # Cancel and re-create the process task.
+                # Cancel and re-create the process task. Previously this branch
+                # was skipped when the queue contained an uninterruptible frame,
+                # which caused slow non-uninterruptible frames to block
+                # interruptions. Uninterruptible queued frames are safe here
+                # because __create_process_task calls __reset_process_queue
+                # internally, which always preserves them.
                 await self.__cancel_process_task()
                 self.__create_process_task()
         except Exception as e:

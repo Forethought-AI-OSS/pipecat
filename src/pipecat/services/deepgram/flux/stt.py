@@ -31,7 +31,7 @@ try:
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error("In order to use Deepgram Flux, you need to `pip install pipecat-ai[deepgram]`.")
-    raise Exception(f"Missing module: {e}")
+    raise ImportError(f"Missing module: {e}") from e
 
 # Re-export for backward compatibility
 __all__ = [
@@ -115,6 +115,7 @@ class DeepgramFluxSTTService(DeepgramFluxSTTBase, WebsocketService):
         tag: list | None = None,
         params: InputParams | None = None,
         should_interrupt: bool = True,
+        watchdog_min_timeout: float = 0.5,
         settings: Settings | None = None,
         **kwargs,
     ):
@@ -140,6 +141,8 @@ class DeepgramFluxSTTService(DeepgramFluxSTTBase, WebsocketService):
                     Use ``settings=DeepgramFluxSTTService.Settings(...)`` instead.
 
             should_interrupt: Determine whether the bot should be interrupted when Flux detects that the user is speaking.
+            watchdog_min_timeout: Minimum silence duration in seconds before the watchdog
+                sends silence to prevent dangling turns. Defaults to 0.5.
             settings: Runtime-updatable settings. When provided alongside deprecated
                 parameters, ``settings`` values take precedence.
             **kwargs: Additional arguments passed to the parent classes.
@@ -224,6 +227,7 @@ class DeepgramFluxSTTService(DeepgramFluxSTTBase, WebsocketService):
             mip_opt_out=mip_opt_out,
             tag=tag,
             should_interrupt=should_interrupt,
+            watchdog_min_timeout=watchdog_min_timeout,
             settings=default_settings,
             sample_rate=sample_rate,
             **kwargs,
@@ -234,6 +238,11 @@ class DeepgramFluxSTTService(DeepgramFluxSTTBase, WebsocketService):
         self._url = url
         self._websocket_url = None
         self._receive_task = None
+
+    @property
+    def supports_ttfs(self) -> bool:
+        """TTFS doesn't apply: Flux defines turn boundaries directly."""
+        return False
 
     # ------------------------------------------------------------------
     # Transport interface implementation
@@ -390,6 +399,7 @@ class DeepgramFluxSTTService(DeepgramFluxSTTBase, WebsocketService):
 
         try:
             self._last_stt_time = time.monotonic()
+            self._last_audio_chunk_duration = len(audio) / (self.sample_rate * 2)
             await self.send_with_retry(audio, self._report_error)
         except Exception as e:
             yield ErrorFrame(error=f"Unknown error occurred: {e}")

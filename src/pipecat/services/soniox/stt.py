@@ -8,6 +8,7 @@
 
 import json
 import time
+from collections import Counter
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Any
@@ -38,7 +39,7 @@ try:
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error("In order to use Soniox, you need to `pip install pipecat-ai[soniox]`.")
-    raise Exception(f"Missing module: {e}")
+    raise ImportError(f"Missing module: {e}") from e
 
 
 KEEPALIVE_MESSAGE = '{"type": "keepalive"}'
@@ -154,7 +155,6 @@ def language_to_soniox_language(language: Language) -> str:
         Language.ID: "id",
         Language.IT: "it",
         Language.JA: "ja",
-        Language.KA: "ka",
         Language.KK: "kk",
         Language.KN: "kn",
         Language.KO: "ko",
@@ -201,6 +201,24 @@ def _prepare_language_hints(
     return list(set(prepared_languages))
 
 
+def _language_from_tokens(tokens: list[dict]) -> Language | None:
+    language_counts: Counter[Language] = Counter()
+
+    for token in tokens:
+        language = token.get("language")
+        if not language:
+            continue
+        try:
+            language_counts[Language(language)] += 1
+        except ValueError:
+            pass
+
+    if not language_counts:
+        return None
+
+    return language_counts.most_common(1)[0][0]
+
+
 @dataclass
 class SonioxSTTSettings(STTSettings):
     """Settings for SonioxSTTService.
@@ -213,6 +231,7 @@ class SonioxSTTSettings(STTSettings):
             context_version 2.
         enable_speaker_diarization: Whether to enable speaker diarization.
         enable_language_identification: Whether to enable language identification.
+        max_endpoint_delay_ms: Max ms before endpoint detection finalizes the turn (500-3000).
         client_reference_id: Client reference ID to use for transcription.
     """
 
@@ -223,6 +242,7 @@ class SonioxSTTSettings(STTSettings):
     enable_language_identification: bool | None | _NotGiven = field(
         default_factory=lambda: NOT_GIVEN
     )
+    max_endpoint_delay_ms: int | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     client_reference_id: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
 
 
@@ -290,6 +310,7 @@ class SonioxSTTService(WebsocketSTTService):
             context=None,
             enable_speaker_diarization=False,
             enable_language_identification=False,
+            max_endpoint_delay_ms=None,
             client_reference_id=None,
         )
 
@@ -371,8 +392,7 @@ class SonioxSTTService(WebsocketSTTService):
         changed = await super()._update_settings(delta)
 
         if changed:
-            await self._disconnect()
-            await self._connect()
+            await self._request_reconnect()
 
         return changed
 
@@ -503,6 +523,7 @@ class SonioxSTTService(WebsocketSTTService):
                 "audio_format": self._audio_format,
                 "num_channels": self._num_channels,
                 "enable_endpoint_detection": enable_endpoint_detection,
+                "max_endpoint_delay_ms": s.max_endpoint_delay_ms,
                 "sample_rate": self.sample_rate,
                 "language_hints": _prepare_language_hints(assert_given(s.language_hints)),
                 "language_hints_strict": s.language_hints_strict,
@@ -518,8 +539,8 @@ class SonioxSTTService(WebsocketSTTService):
             await self._call_event_handler("on_connected")
             logger.debug("Connected to Soniox STT")
         except Exception as e:
+            self._websocket = None
             await self.push_error(error_msg=f"Unable to connect to Soniox: {e}", exception=e)
-            raise
 
     async def _disconnect_websocket(self):
         """Close the websocket connection to Soniox."""
@@ -557,6 +578,7 @@ class SonioxSTTService(WebsocketSTTService):
         async def send_endpoint_transcript():
             if self._final_transcription_buffer:
                 text = "".join(map(lambda token: token["text"], self._final_transcription_buffer))
+                language = _language_from_tokens(self._final_transcription_buffer)
                 # Soniox only pushes TranscriptionFrame when an end token is received,
                 # so every TranscriptionFrame is inherently finalized
                 await self.push_frame(
@@ -564,11 +586,12 @@ class SonioxSTTService(WebsocketSTTService):
                         text=text,
                         user_id=self._user_id,
                         timestamp=time_now_iso8601(),
+                        language=language,
                         result=self._final_transcription_buffer,
                         finalized=True,
                     )
                 )
-                await self._handle_transcription(text, is_final=True)
+                await self._handle_transcription(text, is_final=True, language=language)
                 await self.stop_processing_metrics()
                 self._final_transcription_buffer = []
 

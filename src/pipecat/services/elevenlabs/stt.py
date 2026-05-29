@@ -19,6 +19,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
+from urllib.parse import urlencode
 
 import aiohttp
 from loguru import logger
@@ -36,7 +37,7 @@ from pipecat.frames.frames import (
     VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
-from pipecat.services.settings import NOT_GIVEN, STTSettings, _NotGiven
+from pipecat.services.settings import NOT_GIVEN, STTSettings, _NotGiven, is_given
 from pipecat.services.stt_latency import ELEVENLABS_REALTIME_TTFS_P99, ELEVENLABS_TTFS_P99
 from pipecat.services.stt_service import SegmentedSTTService, WebsocketSTTService
 from pipecat.transcriptions.language import Language, resolve_language
@@ -51,7 +52,7 @@ except ModuleNotFoundError as e:
     logger.error(
         "In order to use ElevenLabs Realtime STT, you need to `pip install pipecat-ai[elevenlabs]`."
     )
-    raise Exception(f"Missing module: {e}")
+    raise ImportError(f"Missing module: {e}") from e
 
 
 def language_to_elevenlabs_language(language: Language) -> str:
@@ -187,9 +188,11 @@ class ElevenLabsSTTSettings(STTSettings):
     Parameters:
         tag_audio_events: Whether to include audio events like (laughter),
             (coughing) in the transcription.
+        keyterms: List of key terms or phrases to bias transcription towards.
     """
 
     tag_audio_events: bool | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    keyterms: list[str] | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
 
 
 @dataclass
@@ -199,12 +202,14 @@ class ElevenLabsRealtimeSTTSettings(STTSettings):
     See ``ElevenLabsRealtimeSTTService.InputParams`` for detailed descriptions.
 
     Parameters:
+        keyterms: List of key terms or phrases to bias transcription towards.
         vad_silence_threshold_secs: Seconds of silence before VAD commits (0.3-3.0).
         vad_threshold: VAD sensitivity (0.1-0.9, lower is more sensitive).
         min_speech_duration_ms: Minimum speech duration for VAD (50-2000ms).
         min_silence_duration_ms: Minimum silence duration for VAD (50-2000ms).
     """
 
+    keyterms: list[str] | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     vad_silence_threshold_secs: float | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     vad_threshold: float | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     min_speech_duration_ms: int | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
@@ -277,6 +282,7 @@ class ElevenLabsSTTService(SegmentedSTTService):
             model="scribe_v2",
             language=Language.EN,
             tag_audio_events=None,
+            keyterms=None,
         )
 
         # 2. Apply direct init arg overrides (deprecated)
@@ -352,9 +358,14 @@ class ElevenLabsSTTService(SegmentedSTTService):
 
         # Add required model_id and language_code
         data.add_field("model_id", self._settings.model)
-        data.add_field("language_code", self._settings.language)
+        if self._settings.language:
+            data.add_field("language_code", self._settings.language)
         if self._settings.tag_audio_events is not None:
             data.add_field("tag_audio_events", str(self._settings.tag_audio_events).lower())
+        keyterms = self._settings.keyterms
+        if is_given(keyterms) and keyterms is not None:
+            for keyterm in keyterms:
+                data.add_field("keyterms", keyterm)
 
         async with self._session.post(url, data=data, headers=headers) as response:
             if response.status != 200:
@@ -539,6 +550,7 @@ class ElevenLabsRealtimeSTTService(WebsocketSTTService):
             vad_threshold=None,
             min_speech_duration_ms=None,
             min_silence_duration_ms=None,
+            keyterms=None,
         )
 
         # 2. Apply direct init arg overrides (deprecated)
@@ -771,6 +783,11 @@ class ElevenLabsRealtimeSTTService(WebsocketSTTService):
             params.append(f"audio_format={self._audio_format}")
             params.append(f"commit_strategy={self._commit_strategy.value}")
 
+            keyterms = self._settings.keyterms
+            if is_given(keyterms) and keyterms is not None:
+                for keyterm in keyterms:
+                    params.append(urlencode({"keyterms": keyterm}))
+
             # Add optional parameters
             if self._include_timestamps:
                 params.append(f"include_timestamps={str(self._include_timestamps).lower()}")
@@ -806,6 +823,7 @@ class ElevenLabsRealtimeSTTService(WebsocketSTTService):
             await self._call_event_handler("on_connected")
             logger.debug("Connected to ElevenLabs Realtime STT")
         except Exception as e:
+            self._websocket = None
             await self.push_error(
                 error_msg=f"Unable to connect to ElevenLabs Realtime STT: {e}", exception=e
             )
