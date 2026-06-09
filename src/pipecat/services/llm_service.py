@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
+    ClassVar,
     Generic,
     Protocol,
     cast,
@@ -43,12 +44,14 @@ from pipecat.frames.frames import (
     FunctionCallsStartedFrame,
     InterruptionFrame,
     LLMConfigureOutputFrame,
+    LLMContextFrame,
     LLMContextSummaryRequestFrame,
     LLMContextSummaryResultFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMTextFrame,
     LLMUpdateSettingsFrame,
+    RealtimeServiceMetadataFrame,
     StartFrame,
 )
 from pipecat.processors.aggregators.llm_context import (
@@ -100,6 +103,34 @@ class FunctionCallResultCallback(Protocol):
                 intermediate update instead of the final result.
         """
         ...
+
+
+@dataclass(frozen=True)
+class RealtimeServiceInfo:
+    """Per-service metadata for realtime (speech-to-speech) LLM services.
+
+    Realtime LLM subclasses set ``LLMService._realtime_service_info`` to a
+    populated instance; the presence of a non-None value is what marks a
+    service as realtime. Non-realtime services keep the default ``None``.
+
+    Carries the configuration ``LLMService`` and
+    ``LLMContextAggregatorPair`` need to wire up realtime behavior:
+    auto-broadcasting ``RealtimeServiceMetadataFrame`` at start, the
+    startup INFO log for services with no server-side turn signals, and
+    the aggregator's one-time recommendation log.
+
+    Parameters:
+        emits_user_turn_frames: Class-level capability — whether the
+            service is ever able to emit ``UserStartedSpeakingFrame`` /
+            ``UserStoppedSpeakingFrame`` from server-side turn signals.
+            False for services with no server-side turn signals at all
+            (e.g. Gemini Live, AWS Nova Sonic, Ultravox). Services with
+            configurable turn detection (e.g. OpenAI Realtime) keep this
+            True and reflect the live setting by overriding
+            ``LLMService._emits_user_turn_frames()``.
+    """
+
+    emits_user_turn_frames: bool = True
 
 
 @dataclass
@@ -250,6 +281,15 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
     # However, subclasses should override this with a more specific adapter when necessary.
     adapter_class: type[BaseLLMAdapter] = OpenAILLMAdapter
 
+    # Marker + per-service config for realtime (speech-to-speech) LLM
+    # services. Realtime subclasses override this with a populated
+    # ``RealtimeServiceInfo`` instance — the presence of a non-None value
+    # is what marks the service as realtime. Non-realtime services keep
+    # the default ``None`` and the realtime-specific machinery
+    # (auto-broadcast of ``RealtimeServiceMetadataFrame``, startup INFO
+    # log for services without server-side turn signals) stays inert.
+    _realtime_service_info: ClassVar[RealtimeServiceInfo | None] = None
+
     # Returned to the LLM as the tool result when an unavailable function is
     # called. Deliberately neutral about future availability so the LLM can
     # pick the function up again if it returns (e.g. via the
@@ -364,6 +404,24 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
         """
         raise NotImplementedError(f"run_inference() not supported by {self.__class__.__name__}")
 
+    def _emits_user_turn_frames(self) -> bool:
+        """Whether this instance emits server-driven user-speaking turn frames at runtime.
+
+        Defaults to ``RealtimeServiceInfo.emits_user_turn_frames`` — the
+        class-level capability (False for services with no server-side
+        turn signals, e.g. Gemini Live, Nova Sonic, Ultravox; True
+        otherwise). Subclasses with configurable turn detection
+        (e.g. OpenAI Realtime with ``turn_detection=False``) should
+        override this to return the live value so the broadcast
+        ``RealtimeServiceMetadataFrame.emits_user_turn_frames`` reflects
+        the actual configuration. ``LLMContextAggregatorPair`` reads
+        the broadcast value when deciding whether to swap default turn
+        strategies for ``ExternalUserTurnStart/StopStrategy``.
+        """
+        if self._realtime_service_info is None:
+            return False
+        return self._realtime_service_info.emits_user_turn_frames
+
     async def start(self, frame: StartFrame):
         """Start the LLM service.
 
@@ -375,6 +433,24 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
             await self._create_sequential_runner_task()
         if self._enable_async_tool_cancellation and self._has_async_tools():
             self._setup_async_tool_cancellation()
+        if (
+            self._realtime_service_info is not None
+            and not self._realtime_service_info.emits_user_turn_frames
+        ):
+            logger.warning(
+                f"{self} doesn't emit turn frames "
+                "(UserStartedSpeakingFrame/UserStoppedSpeakingFrame). A couple "
+                "of things to keep in mind:\n"
+                "  - Other processors in the pipeline (e.g. RTVI) may expect "
+                "turn frames. You can enable local VAD/turn detection by "
+                "setting a vad_analyzer in LLMUserAggregatorParams.\n"
+                "  - Be aware that local turns may NOT perfectly align with "
+                'the "ground truth" of server-decided turns, so they should '
+                "be thought of as APPROXIMATE (unless, of course, you're "
+                "also configuring local turn detection to *drive* the "
+                "realtime service's turns, e.g. by setting "
+                "vad=GeminiVADParams(disabled=True))."
+            )
 
     async def stop(self, frame: EndFrame):
         """Stop the LLM service.
@@ -511,6 +587,13 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
         elif isinstance(frame, LLMContextSummaryRequestFrame):
             await self._handle_summary_request(frame)
 
+        if isinstance(frame, LLMContextFrame):
+            # Auto-register handlers for any direct functions advertised in the
+            # context. Runs before the subclass processes the context (subclasses
+            # call super().process_frame() first), so handlers are in place by the
+            # time the LLM can call them.
+            self._auto_register_direct_functions(frame.context)
+
     async def push_frame(self, frame: Frame, direction: FrameDirection = FrameDirection.DOWNSTREAM):
         """Pushes a frame.
 
@@ -523,6 +606,23 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
                 frame.skip_tts = self._skip_tts
 
         await super().push_frame(frame, direction)
+
+        # Broadcast realtime-service metadata right after StartFrame goes
+        # downstream, so downstream sees StartFrame then metadata (and the
+        # upstream aggregator, already started, can act on it). We hook
+        # push_frame rather than process_frame because realtime subclasses
+        # forward StartFrame from their own trailing push_frame, not the
+        # base process_frame — this is the one spot that catches them all.
+        if (
+            self._realtime_service_info is not None
+            and isinstance(frame, StartFrame)
+            and direction == FrameDirection.DOWNSTREAM
+        ):
+            await self.broadcast_frame(
+                RealtimeServiceMetadataFrame,
+                service_name=self.name,
+                emits_user_turn_frames=self._emits_user_turn_frames(),
+            )
 
     async def _push_llm_text(self, text: str):
         """Push LLM text, using turn completion detection if enabled.
@@ -743,6 +843,35 @@ class LLMService(UserTurnCompletionLLMServiceMixin, AIService, Generic[TAdapter]
             cancel_on_interruption=cancel_on_interruption,
             timeout_secs=timeout_secs,
         )
+
+    def _auto_register_direct_functions(self, context: LLMContext) -> None:
+        """Register handlers for direct functions advertised in the context.
+
+        A direct function bundles its handler with its schema, so advertising one
+        in the context's tools is enough to make it callable — no explicit
+        ``register_direct_function`` call is needed. Per-function options are read
+        from the attributes set by the ``@direct_function`` / ``@tool`` decorator,
+        falling back to defaults when undecorated.
+
+        Any direct function whose name is already registered (explicitly, or from
+        a previous context) is left untouched, so explicit registration always
+        wins and repeated context frames don't re-register.
+
+        Args:
+            context: The LLM context whose advertised tools should be scanned.
+        """
+        tools = context.tools if context is not None else None
+        if tools is None or not is_given(tools):
+            return
+        for wrapper in tools.direct_functions:
+            if wrapper.name in self._functions:
+                continue
+            handler = wrapper.function
+            self.register_direct_function(
+                handler,
+                cancel_on_interruption=getattr(handler, "cancel_on_interruption", True),
+                timeout_secs=getattr(handler, "timeout", None),
+            )
 
     def unregister_function(self, function_name: str | None):
         """Remove a registered function handler.

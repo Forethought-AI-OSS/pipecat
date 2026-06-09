@@ -20,7 +20,7 @@ Features:
 
 Requirements:
     - INWORLD_API_KEY environment variable set
-    - pip install pipecat-ai[inworld]
+    - uv add "pipecat-ai[inworld]"
 
 Usage:
     python realtime-inworld.py --transport webrtc
@@ -46,6 +46,7 @@ from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
     AssistantTurnStoppedMessage,
     LLMContextAggregatorPair,
+    UserTurnMessageAddedMessage,
     UserTurnStoppedMessage,
 )
 from pipecat.runner.types import RunnerArguments
@@ -55,6 +56,7 @@ from pipecat.services.llm_service import FunctionCallParams
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
+from pipecat.turns.user_stop import BaseUserTurnStopStrategy
 from pipecat.workers.runner import WorkerRunner
 
 load_dotenv(override=True)
@@ -149,7 +151,10 @@ Always be helpful and proactive in offering assistance.""",
         tools,
     )
 
-    user_aggregator, assistant_aggregator = LLMContextAggregatorPair(context)
+    user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
+        context,
+        realtime_service_mode=True,
+    )
 
     # Build the pipeline
     pipeline = Pipeline(
@@ -182,8 +187,25 @@ Always be helpful and proactive in offering assistance.""",
         logger.info("Client disconnected")
         await worker.cancel()
 
+    # Subscribe to user turn lifecycle events. Inworld emits its own
+    # user-turn frames from server-side semantic VAD, so
+    # on_user_turn_stopped fires at the turn boundary. In realtime mode
+    # UserTurnStoppedMessage.content is None because the user transcript
+    # isn't finalized at turn-stop time — subscribe to
+    # on_user_turn_message_added for the finalized text (it's written when
+    # the assistant response begins). The assistant message is finalized
+    # at turn-stop time in both modes, so on_assistant_turn_stopped
+    # carries the content directly.
     @user_aggregator.event_handler("on_user_turn_stopped")
-    async def on_user_turn_stopped(aggregator, strategy, message: UserTurnStoppedMessage):
+    async def on_user_turn_stopped(
+        aggregator,
+        strategy: BaseUserTurnStopStrategy,
+        message: UserTurnStoppedMessage,
+    ):
+        logger.info(f"User turn stopped at {message.timestamp}")
+
+    @user_aggregator.event_handler("on_user_turn_message_added")
+    async def on_user_turn_message_added(aggregator, message: UserTurnMessageAddedMessage):
         timestamp = f"[{message.timestamp}] " if message.timestamp else ""
         logger.info(f"Transcript: {timestamp}user: {message.content}")
 

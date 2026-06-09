@@ -56,7 +56,7 @@ from pipecat.services.aws.nova_sonic.session_continuation import (
     SessionContinuationHelper,
     SessionContinuationParams,
 )
-from pipecat.services.llm_service import LLMService
+from pipecat.services.llm_service import LLMService, RealtimeServiceInfo
 from pipecat.services.settings import NOT_GIVEN, LLMSettings, _NotGiven, assert_given
 from pipecat.utils.time import time_now_iso8601
 
@@ -78,9 +78,7 @@ try:
     from smithy_core.aio.eventstream import DuplexEventStream
 except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
-    logger.error(
-        "In order to use AWS services, you need to `pip install pipecat-ai[aws-nova-sonic]`."
-    )
+    logger.error('In order to use AWS services, you need to `uv add "pipecat-ai[aws-nova-sonic]"`.')
     raise ImportError(f"Missing module: {e}") from e
 
 
@@ -241,6 +239,17 @@ class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
 
     Provides bidirectional audio streaming, real-time transcription, text generation,
     and function calling capabilities using AWS Nova Sonic model.
+
+    Does NOT emit ``UserStartedSpeakingFrame`` / ``UserStoppedSpeakingFrame``,
+    so pipeline processors that depend on those frames — RTVI client
+    speech events, ``TurnTrackingObserver``, ``AudioBufferProcessor`` turn
+    recording, ``UserIdleController``, user mute strategies, voicemail
+    detector — won't activate with the default server-VAD-only setup. Pair
+    with ``LLMContextAggregatorPair(..., realtime_service_mode=True)``
+    so context writes are correct anyway. To produce the turn frames
+    locally, wire ``vad_analyzer=SileroVADAnalyzer()`` (or similar) into
+    ``LLMUserAggregatorParams``; locally-generated turn boundaries are a
+    heuristic and may not match Nova Sonic's server-side turn decisions.
     """
 
     Settings = AWSNovaSonicLLMSettings
@@ -248,6 +257,10 @@ class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
 
     # Override the default adapter to use the AWSNovaSonicLLMAdapter one
     adapter_class = AWSNovaSonicLLMAdapter
+
+    # Realtime (speech-to-speech) service. Does NOT emit
+    # UserStarted/StoppedSpeakingFrame from server-side turn signals.
+    _realtime_service_info = RealtimeServiceInfo(emits_user_turn_frames=False)
 
     def __init__(
         self,
@@ -1428,9 +1441,15 @@ class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
                         if self._sc.on_content_end_assistant_final_text(content.text_content):
                             self.create_task(self._run_sc_handoff(), name="sc_handoff")
                 else:
+                    # FINAL TEXT INTERRUPTED is the canonical barge-in
+                    # signal. The AUDIO branch usually closed the
+                    # response already (AUDIO contentEnd arrives with
+                    # END_TURN on barge-in, before this), but the
+                    # output transport's audio buffer is still draining
+                    # — broadcast unconditionally to clear it.
+                    await self.broadcast_interruption()
                     if self._assistant_is_responding:
-                        # TEXT INTERRUPTED before audio started means no AUDIO
-                        # contentEnd will arrive — end the response here.
+                        # No AUDIO contentEnd will arrive — close here.
                         self._assistant_is_responding = False
                         await self._report_assistant_response_ended()
                     # Session continuation: TEXT INTERRUPTED is a completion
@@ -1443,6 +1462,18 @@ class AWSNovaSonicLLMService(LLMService[AWSNovaSonicLLMAdapter]):
                 if stop_reason in ("END_TURN", "INTERRUPTED"):
                     # END_TURN: normal completion. INTERRUPTED: user interrupted
                     # mid-audio. Both mean no more audio for this turn.
+                    if stop_reason == "INTERRUPTED":
+                        # Emit InterruptionFrame upstream so the assistant
+                        # aggregator marks the message interrupted=True, and
+                        # downstream so BaseOutputTransport clears the audio
+                        # buffer (without this the bot keeps talking past the
+                        # interruption while the buffer drains, since Nova
+                        # Sonic doesn't surface server-side interruption any
+                        # other way). Must fire before
+                        # _report_assistant_response_ended so the aggregator
+                        # handles InterruptionFrame before LLMFullResponseEndFrame
+                        # closes the turn.
+                        await self.broadcast_interruption()
                     self._assistant_is_responding = False
                     await self._report_assistant_response_ended()
         elif content.role == Role.USER:

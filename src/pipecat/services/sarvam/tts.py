@@ -48,6 +48,8 @@ from typing import Any, ClassVar
 import aiohttp
 from loguru import logger
 from pydantic import BaseModel, Field
+from websockets.asyncio.client import connect as websocket_connect
+from websockets.protocol import State
 
 from pipecat.frames.frames import (
     CancelFrame,
@@ -63,14 +65,6 @@ from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven, assert_
 from pipecat.services.tts_service import InterruptibleTTSService, TextAggregationMode, TTSService
 from pipecat.transcriptions.language import Language, resolve_language
 from pipecat.utils.tracing.service_decorators import traced_tts
-
-try:
-    from websockets.asyncio.client import connect as websocket_connect
-    from websockets.protocol import State
-except ModuleNotFoundError as e:
-    logger.error(f"Exception: {e}")
-    logger.error("In order to use Sarvam, you need to `pip install pipecat-ai[sarvam]`.")
-    raise ImportError(f"Missing module: {e}") from e
 
 
 class SarvamTTSModel(StrEnum):
@@ -967,8 +961,10 @@ class SarvamTTSService(InterruptibleTTSService):
         self._output_audio_codec = output_audio_codec
         self._output_audio_bitrate = output_audio_bitrate
 
-        # WebSocket endpoint URL with model query parameter
-        self._websocket_url = f"{url}?model={resolved_model}"
+        # WebSocket endpoint URL with model query parameter. We explicitly request
+        # the completion event so we can emit TTSStoppedFrame as soon as synthesis
+        # finishes, rather than waiting for the stop_frame_timeout_s idle timer.
+        self._websocket_url = f"{url}?model={resolved_model}&send_completion_event=true"
         self._api_key = api_key
 
         self._receive_task = None
@@ -1161,6 +1157,18 @@ class SarvamTTSService(InterruptibleTTSService):
                     audio = base64.b64decode(msg["data"]["audio"])
                     frame = TTSAudioRawFrame(audio, self.sample_rate, 1, context_id=context_id)
                     await self.append_to_audio_context(context_id, frame)
+                elif (
+                    msg.get("type") == "event" and msg.get("data", {}).get("event_type") == "final"
+                ):
+                    # Synthesis for the active context is complete. Emit the
+                    # TTSStoppedFrame immediately so BotStoppedSpeakingFrame tracks
+                    # the end of audio, instead of waiting on stop_frame_timeout_s.
+                    logger.trace(f"TTS final event for context_id={context_id}")
+                    if context_id and self.audio_context_available(context_id):
+                        await self.append_to_audio_context(
+                            context_id, TTSStoppedFrame(context_id=context_id)
+                        )
+                        await self.remove_audio_context(context_id)
                 elif msg.get("type") == "error":
                     error_msg = msg["data"]["message"]
                     await self.push_error(error_msg=f"TTS Error: {error_msg}")

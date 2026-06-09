@@ -14,6 +14,7 @@ and LLM processing.
 from __future__ import annotations
 
 import time
+import warnings
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import (
@@ -745,11 +746,29 @@ class TTSSpeakFrame(DataFrame):
 
     Parameters:
         text: The text to be spoken.
-        append_to_context: Whether to append the text to the context.
+        append_to_context: Whether the spoken text should be appended to the LLM
+            context. Defaults to True. (Note that, as of version 1.4.0, ``None`` —
+            the previous default — is no longer a supported value.)
     """
 
     text: str
-    append_to_context: bool | None = None
+    append_to_context: bool = True
+
+    def __post_init__(self):
+        super().__post_init__()
+        # Backward compatibility: callers used to be able to pass None.
+        # Coerce it to the new default of True and warn, so existing code keeps
+        # working while surfacing the change.
+        if self.append_to_context is None:
+            with warnings.catch_warnings():
+                warnings.simplefilter("always")
+                warnings.warn(
+                    "TTSSpeakFrame.append_to_context=None is deprecated and has been "
+                    "converted to True, the new default.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+            self.append_to_context = True
 
 
 @dataclass
@@ -1440,6 +1459,30 @@ class STTMetadataFrame(ServiceMetadataFrame):
 
 
 @dataclass
+class RealtimeServiceMetadataFrame(ServiceMetadataFrame):
+    """Metadata announcing a realtime (speech-to-speech) LLM service.
+
+    Broadcast by realtime LLM services at pipeline start so downstream
+    processors — notably ``LLMContextAggregatorPair`` — can detect that
+    a realtime service is in the pipeline. The aggregator uses this to
+    surface a one-time recommendation to opt in to
+    ``realtime_service_mode=True`` when it hasn't been configured.
+
+    Parameters:
+        emits_user_turn_frames: Whether this service is currently
+            configured to emit ``UserStartedSpeakingFrame`` /
+            ``UserStoppedSpeakingFrame`` from server-side turn signals.
+            False for services with no server-side turn signals at all
+            (e.g. Gemini Live, AWS Nova Sonic, Ultravox), and also
+            False for services whose server-side turn detection has
+            been disabled by configuration (e.g. OpenAI Realtime with
+            ``turn_detection=False``).
+    """
+
+    emits_user_turn_frames: bool = True
+
+
+@dataclass
 class ServiceSwitcherRequestMetadataFrame(ControlFrame):
     """Request a service to re-emit its metadata frames.
 
@@ -1835,9 +1878,13 @@ class TTSStartedFrame(ControlFrame):
 
     Parameters:
         context_id: Unique identifier for this TTS context.
+        append_to_context: Whether the spoken text for this response will be
+            appended to the LLM context. Mirrors the value carried by the
+            response's TTSTextFrames.
     """
 
     context_id: str | None = None
+    append_to_context: bool = True
 
 
 @dataclass
