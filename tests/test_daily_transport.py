@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from pipecat.frames.frames import BotConnectedFrame, STTMetadataFrame
+from pipecat.frames.frames import BotConnectedFrame, OutputTransportMessageFrame, STTMetadataFrame
 from pipecat.services.stt_latency import DEEPGRAM_TTFS_P99
 from pipecat.transports.daily.transport import DailyParams, DailyTransport
 
@@ -50,6 +50,19 @@ def _make_dialin_transport() -> DailyTransport:
         api_key="test-api-key",
         dialin_settings={"call_id": "test-call", "call_domain": "test-domain"},
     )
+
+
+@pytest.mark.asyncio
+async def test_send_message_ignores_released_client():
+    transport = _make_transport()
+    client = transport._client
+    client._client = None
+    frame = OutputTransportMessageFrame(message={"type": "test"})
+
+    result = await client.send_message(frame)
+
+    assert result is None
+    assert client._join_message_queue == []
 
 
 @pytest.mark.asyncio

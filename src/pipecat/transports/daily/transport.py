@@ -605,6 +605,10 @@ class DailyTransportClient(EventHandler):
         Returns:
             An error description, or None on success.
         """
+        if not self._client:
+            # The Daily client may already be released during transport teardown.
+            return None
+
         if not self._joined:
             self._join_message_queue.append(frame)
             return None
