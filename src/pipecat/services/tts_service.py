@@ -742,6 +742,17 @@ class TTSService(AIService):
         if self._turn_context_id and self.audio_context_available(self._turn_context_id):
             await self.flush_audio(context_id=self._turn_context_id)
 
+        if (
+            self._turn_context_id is not None
+            and not self.audio_context_available(self._turn_context_id)
+            and self._turn_context_id in self._pending_llm_response_end_frames
+            and self._llm_response_started
+        ):
+            logger.warning(
+                f"{self}: LLMFullResponseEndFrame will not be emitted because "
+                "the LLM response completed without a TTS audio context"
+            )
+
         # Reset the turn context ID
         self._turn_context_id = None
 
